@@ -8,6 +8,8 @@
 #ifndef POINTSOURCE_H_
 #define POINTSOURCE_H_
 
+#define RAYTRACE_SOURCE "pointsource"
+
 #include "raytracer.h"
 
 template <typename T>
@@ -30,6 +32,7 @@ public:
 	void redshift_start( );
 	void redshift(T V );
 	using Raytracer<T>::redshift;
+
 };
 
 #endif /* POINTSOURCE_H_ */

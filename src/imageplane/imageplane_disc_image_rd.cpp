@@ -74,7 +74,9 @@ int main(int argc, char **argv)
     double rb2 = par_file.get_parameter<double>("rb2", 10);
     double q3 = par_file.get_parameter<double>("q3", 3);
     double precision = par_file.get_parameter<double>("precision", PRECISION);
-    bool flip_image = par_file.get_parameter<bool>("flip_image", true);
+    // ImagePlane now places the ray from pixel (x, y) on the (x, y) side of the black hole (y > 0 towards the
+    // pole), so the image is correctly oriented without flipping; flip_image = 1 restores the old (inverted) output
+    bool flip_image = par_file.get_parameter<bool>("flip_image", false);
 
     double dx = (xmax - x0) / Nx;
     double dy = (ymax - y0) / Ny;

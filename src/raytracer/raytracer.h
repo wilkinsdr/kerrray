@@ -37,6 +37,16 @@
 // ~3x headroom above the observed maximum while terminating stuck rays
 // 100x faster than STEPLIM.
 #define RK45_STEPLIM 100000
+// step limit for the symplectic (Mino-time) integrator.  Its step is fixed in Mino time near
+// the black hole and capped to a fixed affine step far away (via max_tstep), so the count is
+// bounded by ~r_max/max_tstep plus the strong-field orbits; 1M gives ample headroom for
+// photon-sphere rays while still terminating stuck ones.
+#define SYMP_STEPLIM 1000000
+// horizon threshold for the symplectic integrator, in the radial coordinate u (r = 1 + b cosh u,
+// so u = 0 is the horizon and u = 0.05 is r - r+ ~ 1e-3 b).  The radial potential is singular at
+// u = 0 and photon turning points never lie below u ~ 0.5 (the circular photon orbit) for any spin,
+// so a ray reaching u < SYMP_U_HORIZON is unambiguously captured.
+#define SYMP_U_HORIZON 0.05
 // number of integration steps per GPU thread before integration is paused and kernel must be called again
 // to avoid thread time limits on GPUs running X servers
 #define THREAD_STEPLIM 10000000
@@ -80,7 +90,12 @@ struct Ray
 template <typename T> class RayDestination;
 
 /// Selects the integration algorithm used by run_raytrace().
-enum class Integrator { Euler, RK4, RK45 };
+///   Euler      — fixed-step, semi-analytic (momenta from constants of motion)
+///   RK4        — classical 4th-order Runge-Kutta, fixed step
+///   RK45       — adaptive Dormand-Prince (DOPRI5)
+///   Symplectic — Mino-time symplectic integrator (Störmer-Verlet / Yoshida composition);
+///                integrates the canonical momenta directly, order set by set_symplectic_order()
+enum class Integrator { Euler, RK4, RK45, Symplectic };
 
 template <typename T>
 class Raytracer
@@ -92,6 +107,8 @@ private:
     T max_phistep;
     T maxtstep_rlim;
     T rk45_tol;          // per-step mixed abs/rel error tolerance for the DOPRI5 adaptive controller
+    T symp_step;         // Mino-time step h0 for the symplectic integrator (<= 0: use 1/precision)
+    int symp_order;      // composition order for the symplectic integrator: 2 (Verlet), 4 or 6 (Yoshida, default 6)
 
 protected:	// these members need to be accessible by derived classes to set up different X-ray sources
 	int nRays;
@@ -100,6 +117,10 @@ protected:	// these members need to be accessible by derived classes to set up d
 
 	inline void calculate_constants(int ray, T alpha, T beta, T V, T E);
 	inline void calculate_constants_from_p(int ray, T pt, T pr, T ptheta, T pphi);
+
+    // shared implementation of the two propagate_symplectic() overloads (dest == nullptr: use thetalim)
+    inline int propagate_symplectic_impl(int ray, const T rlim, const T thetalim, RayDestination<T>* dest, const int steplim,
+                                         TextOutput* outfile, int write_step, T write_rmax, T write_rmin, bool write_cartesian);
 
 public:
     Ray<T> *rays;
@@ -123,6 +144,10 @@ public:
     inline int propagate_rk45(int ray, const T rlim, const T thetalim, const int steplim, TextOutput* outfile = 0
                                , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
     inline int propagate_rk45(int ray, const T rlim, RayDestination<T>* dest, const int steplim, TextOutput* outfile = 0
+                               , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
+    inline int propagate_symplectic(int ray, const T rlim, const T thetalim, const int steplim, TextOutput* outfile = 0
+                               , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
+    inline int propagate_symplectic(int ray, const T rlim, RayDestination<T>* dest, const int steplim, TextOutput* outfile = 0
                                , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
 
     void redshift_start(T V, bool reverse = false, bool projradius = false);
@@ -179,6 +204,17 @@ public:
     // longer run times.
     void set_rk45_tol(T tol) { rk45_tol = tol; }
     T    get_rk45_tol() const { return rk45_tol; }
+
+    // Symplectic integrator controls.  The step is the Mino-time step h0 used in the strong-field
+    // region (the affine step is rho^2 * h0); far from the black hole the step is additionally capped
+    // by max_tstep / max_phistep expressed in Mino time.  A non-positive step means 1/precision.
+    // The order selects the composition: 2 = Störmer-Verlet, 4 = Yoshida 4th order, 6 = Yoshida 6th
+    // order (default: the work-precision sweep in docs/plan_symplectic_integrator.md shows order 6 at
+    // max_tstep = 1 to be both faster and more accurate than order 4 at max_tstep = 0.25).
+    void set_symplectic_step(T h0) { symp_step = h0; }
+    T    get_symplectic_step() const { return (symp_step > 0) ? symp_step : T(1) / precision; }
+    void set_symplectic_order(int order) { symp_order = (order == 2 || order == 4) ? order : 6; }
+    int  get_symplectic_order() const { return symp_order; }
 
     void set_max_tstep(T max, T rlim = MAXDT_RLIM)
     {

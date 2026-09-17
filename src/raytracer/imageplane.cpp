@@ -40,7 +40,7 @@ void ImagePlane<T>::init_image_plane(T D, T incl, T phi0,
 	
 	for(int i=0; i<Nx; i++)
 	{
-		const T x = x0 + i * dy;
+		const T x = x0 + i * dx;
 
 		for (int j = 0; j < Ny; j++)
 		{
@@ -103,14 +103,23 @@ void ImagePlane<T>::init_image_plane(T D, T incl, T phi0,
 			T beta = asin(y/b);
 			if(x < 0) beta=M_PI-beta;
 
-			T h = -1.*b*sin(incl)*cos(beta);
+			// Constants of motion of the photon that arrives at the observer at image-plane position
+			// (x, y) = (b cos beta, b sin beta) (Cunningham & Bardeen 1973: alpha = -h / sin(incl) = x,
+			// beta = p_theta at the observer = y), for the ray traced BACKWARDS from the plane.
+			// The backward trace runs in the spin-reversed spacetime (Raytracer constructed with -spin), in
+			// which the reversed ray has h -> -h_phys = +x sin(incl) and p_theta -> -p_theta,phys, i.e. a ray
+			// above the plane centre (y > 0) initially moves towards smaller theta.  (The earlier convention,
+			// h = -x sin(incl) with theta increasing for y > 0, sent the ray from plane position (x, y) past the
+			// black hole on the (-x, -y) side, so that the whole family crossed the line of sight at a distance
+			// D/2 from the black hole; imaging applications compensated with a flip_image option.)
+			T h = b*sin(incl)*cos(beta);
 			T ltheta = b*sin(beta);
 			T Q = (ltheta*ltheta) - (a*cos(theta))*(a*cos(theta))+((h/tan(theta)))*((h/tan(theta)));
 
 			Raytracer<T>::rays[ix].h = h;
 			Raytracer<T>::rays[ix].Q = Q;
 
-			Raytracer<T>::rays[ix].thetadot_sign = (ltheta>=0) ? 1 : -1;
+			Raytracer<T>::rays[ix].thetadot_sign = (ltheta>=0) ? -1 : 1;
 			
 			Raytracer<T>::rays[ix].steps = 0;
 

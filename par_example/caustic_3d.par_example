@@ -1,0 +1,75 @@
+# caustic_3d.par
+#
+# Parameters for 3D caustic mapping in Kerr spacetime: the caustic surface of the congruence of
+# rays reaching a distant observer at Boyer-Lindquist (r = dist, theta = incl), found from the sign
+# changes of the ray-family Jacobian along lockstep ray bundles started on the observer's image plane.
+#
+# Copy this file to par/caustic_3d.par and edit as needed.
+# Run from the project root:
+#   ./bin/caustic_3d --parfile=par/caustic_3d.par --outfile=dat/caustic_3d.fits
+# Plot:
+#   python python/caustic_3d.py dat/caustic_3d.fits
+#   python python/caustic_3d_plotly.py dat/caustic_3d.fits
+#
+
+# Output FITS file (path relative to bin/ or use absolute path)
+outfile = ../dat/caustic_3d.fits
+
+# Observer distance (gravitational radii).  The image plane is placed here with parallel rays,
+# so it must be large enough for that approximation (>= 500 rg).
+dist = 1000
+
+# Observer inclination (degrees from spin axis; 0 = face-on, 90 = edge-on)
+incl = 60
+
+# Azimuth of the image plane centre (radians)
+plane_phi0 = 0
+
+# Black hole spin parameter a/M (0 = Schwarzschild, 0.998 = near-maximal Kerr)
+spin = 0.998
+
+# Image plane extent (gravitational radii).  The caustic tubes are produced by rays with impact
+# parameters close to the critical curve (|b| ~ 3-7 rg); +-10 rg covers the primary structure.
+x0   = -10
+xmax =  10
+y0   = -10
+ymax =  10
+
+# Image plane resolution (grid steps; the plane has (Nx+1)*(Ny+1) rays).
+# 200x200 gives a quick overview; 500x500 or more for a dense map of the tubes.
+Nx = 200
+Ny = 200
+
+# Bundle offset in the image plane (rg): the finite-difference step for the Jacobian.
+# 1e-4 balances truncation (delta^2) and round-off; halve it to check convergence.
+delta = 1e-4
+
+# Rescale the bundle back to delta when an offset ray drifts further than this from the centre ray
+# (keeps the finite differences linear through photon-shell orbits).  Default 100 * delta.
+#delta_max = 1e-2
+
+# Escape radius (rg): rays are traced until they fall through the horizon or pass this radius.
+# Default 1.1 * dist.
+#r_max = 1100
+
+# Maximum number of caustic crossings stored per ray (all crossings are still counted in NCAUST)
+max_caustics = 32
+
+# Symplectic (Mino-time) integrator settings -- the bundle tracer always uses this integrator.
+# Mino-time step in the strong-field region (<= 0 or omitted: 1/precision = 0.01)
+symp_step = 0.01
+# Composition order: 2 (Verlet), 4 or 6 (Yoshida; default 6)
+symp_order = 6
+# Far-field cap on the coordinate-time step per integration step (default 1; 0.25 for ~10x better
+# far-field accuracy at ~3x the cost)
+max_tstep = 1
+# Radius beyond which the coordinate-time cap grows in proportion to r (default 100)
+#maxtstep_rlim = 100
+# Cap on the phi step per integration step (default 0.1)
+#max_phistep = 0.1
+
+# Step limit per ray (default 1000000)
+#steplim = 1000000
+
+# Show progress bar (1 = yes, 0 = no)
+show_progress = 1

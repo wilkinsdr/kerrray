@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 3.5)
+cmake_minimum_required (VERSION 3.10)
 project (raytrace_cpu)
 
 set(CMAKE_BINARY_DIR ${CMAKE_SOURCE_DIR}/bin)
@@ -20,12 +20,16 @@ include_directories(${CFITSIO_INCLUDE_DIR})
 
 # HDF5
 # HDF5_ROOT and HDF5_INCLUDE_DIRS can be specified in CMakeLocal.txt if cmake cannot find them automatically
-set(HDF5_USE_STATIC_LIBRARIES ON)
+#set(HDF5_USE_STATIC_LIBRARIES ON)
 #find_package(HDF5 REQUIRED CXX)
-find_package(HDF5)
-set(hdf5 hdf5)
-set(hdf5_cpp hdf5_cpp)
-set(hdf5_libs hdf5_cpp hdf5)
+find_package(HDF5 REQUIRED CXX)
+find_library(hdf5 hdf5)
+find_library(hdf5_cpp hdf5_cpp)
+# set(hdf5 hdf5)
+# set(hdf5_cpp hdf5_cpp)
+# set(hdf5_libs hdf5_cpp hdf5)
+message(STATUS "HDF5_LIBRARIES: ${HDF5_LIBRARIES}")
+message(STATUS "HDF5_CXX_LIBRARIES: ${HDF5_CXX_LIBRARIES}")
 
 find_package(OpenMP)
 

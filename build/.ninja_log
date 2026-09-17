@@ -1,8 +1,0 @@
-# ninja log v7
-1	368	1772464686897131409	src/raytracer/CMakeFiles/pointsource.dir/pointsource.cpp.o	15820653635992c
-2	431	1772464686897610453	src/emissivity/CMakeFiles/emissivity.dir/emissivity.cpp.o	f887cca0b0f5ce5a
-5	372	1772511364331789250	src/raytracer/CMakeFiles/raytracer.dir/raytracer.cpp.o	f714ad25a53de6ee
-5	349	1772498951328900236	src/raytracer/CMakeFiles/imageplane.dir/imageplane.cpp.o	d9772dbb92885cac
-5	414	1772498951329048403	src/imageplane/CMakeFiles/imageplane_disc_image.dir/imageplane_disc_image.cpp.o	572eee4200c60202
-2	92	1772822061713157369	build.ninja	67af16fafe981d78
-5	385	1772511364332369130	src/imageplane/CMakeFiles/imageplane_disc_image_isco.dir/imageplane_disc_image_isco.cpp.o	db8b0c4f400a3eb8

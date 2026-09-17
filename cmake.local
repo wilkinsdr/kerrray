@@ -1,3 +1,5 @@
+list(APPEND CMAKE_PREFIX_PATH /opt/local)
+
 set(CFITSIO_PATH /opt/software/cfitsio/4.6.3)
 
 # OpenMP via MacPorts libomp (Apple Clang doesn't ship OpenMP natively)

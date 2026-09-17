@@ -66,9 +66,13 @@ int main(int argc, char **argv)
     double q3 = par_file.get_parameter<double>("q3", 3);
     double precision = par_file.get_parameter<double>("precision", PRECISION);
     double max_tstep = par_file.get_parameter<double>("max_tstep", MAXDT);
-    bool flip_image = par_file.get_parameter<bool>("flip_image", true);
+    // ImagePlane now places the ray from pixel (x, y) on the (x, y) side of the black hole (y > 0 towards the
+    // pole), so the image is correctly oriented without flipping; flip_image = 1 restores the old (inverted) output
+    bool flip_image = par_file.get_parameter<bool>("flip_image", false);
     string integrator_str = par_file.get_parameter<string>("integrator", "rk45");
     double rk45_tol = par_file.get_parameter<double>("rk45_tol", 1e-8);
+    double symp_step = par_file.get_parameter<double>("symp_step", -1);    // Mino-time step for the symplectic integrator (<= 0: 1/precision)
+    int symp_order = par_file.get_parameter<int>("symp_order", 6);         // 2, 4 or 6
     int show_progress = (par_args.key_exists("--show_progress")) ? par_args.get_parameter<int>("--show_progress")
                                         : par_file.get_parameter<int>("show_progress", 1);
 
@@ -80,6 +84,8 @@ int main(int argc, char **argv)
     }
     else if (integrator_str == "rk4")
         integrator = Integrator::RK4;
+    else if (integrator_str == "symplectic")
+        integrator = Integrator::Symplectic;
     else
         integrator = Integrator::RK45;
 
@@ -118,6 +124,12 @@ int main(int argc, char **argv)
 
     if (integrator == Integrator::RK45)
         raytrace_source.set_rk45_tol(rk45_tol);
+    if (integrator == Integrator::Symplectic)
+    {
+        raytrace_source.set_symplectic_step(symp_step);
+        raytrace_source.set_symplectic_order(symp_order);
+        raytrace_source.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT)
+    }
 
     raytrace_source.redshift_start();
     raytrace_source.run_raytrace(&dest, integrator, 1.1 * dist, show_progress);

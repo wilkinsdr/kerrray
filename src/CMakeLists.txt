@@ -22,4 +22,7 @@ add_subdirectory (imageplane)
 include_directories("caustic")
 add_subdirectory (caustic)
 
+include_directories("reverb")
+add_subdirectory (reverb)
+
 add_subdirectory (tests)

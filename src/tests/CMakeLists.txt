@@ -12,3 +12,21 @@ target_link_libraries(emissivity_rk45_plot pointsource raytracer)
 
 add_executable(integrator_perf_test integrator_perf_test.cpp)
 target_link_libraries(integrator_perf_test pointsource raytracer)
+
+add_executable(symplectic_unit_test symplectic_unit_test.cpp)
+target_link_libraries(symplectic_unit_test pointsource raytracer)
+
+add_executable(integrator_compare_test integrator_compare_test.cpp)
+target_link_libraries(integrator_compare_test pointsource raytracer)
+
+add_executable(integrator_dest_test integrator_dest_test.cpp)
+target_link_libraries(integrator_dest_test imageplane raytracer)
+
+add_executable(integrator_sweep integrator_sweep.cpp)
+target_link_libraries(integrator_sweep pointsource imageplane raytracer)
+
+add_executable(photon_ring_test photon_ring_test.cpp)
+target_link_libraries(photon_ring_test raytracer)
+
+add_executable(caustic_3d_test caustic_3d_test.cpp)
+target_link_libraries(caustic_3d_test imageplane raytracer)

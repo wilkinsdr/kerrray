@@ -51,6 +51,21 @@ int main(int argc, char** argv)
     double r_disc = par_file.get_parameter<double>("r_esc", 500);
     bool logbin_r = par_file.get_parameter<bool>("logbin_r", true);
     double gamma = par_file.get_parameter<double>("gamma", 2);
+    string integrator_str = par_file.get_parameter<string>("integrator", "rk45");
+    double rk45_tol = par_file.get_parameter<double>("rk45_tol", 1e-8);
+    double symp_step = par_file.get_parameter<double>("symp_step", -1);    // Mino-time step for the symplectic integrator (<= 0: 1/precision)
+    int symp_order = par_file.get_parameter<int>("symp_order", 6);         // 2, 4 or 6
+    double max_tstep = par_file.get_parameter<double>("max_tstep", MAXDT);
+
+    Integrator integrator;
+    if (integrator_str == "euler")
+        integrator = Integrator::Euler;
+    else if (integrator_str == "rk4")
+        integrator = Integrator::RK4;
+    else if (integrator_str == "symplectic")
+        integrator = Integrator::Symplectic;
+    else
+        integrator = Integrator::RK45;
 
     if (par_args.key_exists("--source_h")) source[1] = par_args.get_parameter<double>("--source_h");
 
@@ -76,7 +91,7 @@ int main(int argc, char** argv)
     for(int ir=0; ir<Nr; ir++)
     {
         disc_r[ir] = (logbin_r) ? r_min * pow(dr, ir) : r_min + ir*dr;
-        disc_area[ir] = integrate_disc_area(disc_r[ir], (logbin_r) ? disc_r[ir]*dr : disc_r + dr, spin);
+        disc_area[ir] = integrate_disc_area(disc_r[ir], (logbin_r) ? disc_r[ir]*dr : disc_r[ir] + dr, spin);
 
         disc_rays[ir] = 0;
         disc_flux[ir] = 0;
@@ -87,8 +102,17 @@ int main(int argc, char** argv)
 
 	PointSource<double> raytrace_source(source, V, spin, TOL, dcosalpha, dbeta, cosalpha0, cosalphamax, beta0, betamax);
 
+    if (integrator == Integrator::RK45)
+        raytrace_source.set_rk45_tol(rk45_tol);
+    if (integrator == Integrator::Symplectic)
+    {
+        raytrace_source.set_symplectic_step(symp_step);
+        raytrace_source.set_symplectic_order(symp_order);
+        raytrace_source.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT)
+    }
+
 	raytrace_source.redshift_start();
-	raytrace_source.run_raytrace(Integrator::RK45, M_PI_2, r_max, show_progress);
+	raytrace_source.run_raytrace(integrator, M_PI_2, r_max, show_progress);
     //raytrace_source.run_raytrace(r_max, M_PI_2, show_progress);
 	raytrace_source.range_phi();
 	raytrace_source.redshift(-1.0, false);

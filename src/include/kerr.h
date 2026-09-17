@@ -335,4 +335,225 @@ inline void momentum_from_consts(T& pt, T& pr, T& ptheta, T& pphi,
 }
 
 
+
+// =============================================================================
+// Mino-time helpers for the symplectic integrator (Integrator::Symplectic)
+// =============================================================================
+//
+// With Mino time dlambda_M = dlambda / rhosq, the Kerr null geodesic Hamiltonian
+// multiplied by rhosq separates into independent radial and polar parts:
+//
+//   H_M = H_r(u, p_u) + H_theta(theta, p_theta) = 0
+//   H_r     = 1/2 p_u^2     - P(r)^2 / (2 Delta)              P = (r^2 + a^2) k - a h
+//   H_theta = 1/2 p_theta^2 + (h - a k sin^2theta)^2 / (2 sin^2theta)
+//
+// The radial coordinate u is defined by r = 1 + b cosh(u), b = sqrt(1 - a^2), so
+// that Delta = b^2 sinh^2(u), and the conjugate momentum p_u = sqrt(Delta) p_r.
+// This makes the radial kinetic term a plain 1/2 p_u^2 (trivial, exact drift)
+// and places the event horizon at u = 0.
+//
+// Constants of motion use the same conventions as the rest of the code:
+// k = photon energy (E), h = z angular momentum (L_z), Q = Carter constant.
+// The cyclic coordinates t and phi advance by
+//   dt/dlambda_M   = (r^2 + a^2) P / Delta + a (h - a k sin^2theta)    ( = rhosq * pt   )
+//   dphi/dlambda_M = a P / Delta + h / sin^2theta - a k                ( = rhosq * pphi )
+// where pt, pphi are the contravariant components returned by momentum_from_consts().
+//
+// Contravariant (per affine parameter) momenta as stored in Ray<T>:
+//   pr = Delta p_r / rhosq = sqrt(Delta) p_u / rhosq,   ptheta = p_theta / rhosq
+//
+
+template<typename T>
+inline T mino_b(T a)
+{
+	// b = sqrt(1 - a^2); clamp so that a -> 1 does not degenerate the u coordinate
+	const T aa = (abs(a) > T(0.9999)) ? T(0.9999) : abs(a);
+	return sqrt((1 - aa)*(1 + aa));
+}
+
+template<typename T>
+inline T mino_u_from_r(T r, T a)
+{
+	// inverse of r = 1 + b cosh(u); returns 0 at (or inside) the horizon
+	const T x = (r - 1) / mino_b(a);
+	return (x <= 1) ? T(0) : acosh(x);
+}
+
+template<typename T>
+inline void mino_r_from_u(T u, T a, T& r, T& sqrt_delta)
+{
+	const T b = mino_b(a);
+	r = 1 + b*cosh(u);
+	sqrt_delta = b*sinh(u);
+}
+
+template<typename T>
+inline T mino_tdot(T r, T theta, T k, T h, T a)
+{
+	// dt/dlambda_M
+	const T delta = r*r - 2*r + a*a;
+	const T P = (r*r + a*a)*k - a*h;
+	const T sin2theta = sin(theta)*sin(theta);
+	return (r*r + a*a)*P/delta + a*(h - a*k*sin2theta);
+}
+
+template<typename T>
+inline T mino_phidot(T r, T theta, T k, T h, T a)
+{
+	// dphi/dlambda_M
+	const T delta = r*r - 2*r + a*a;
+	const T P = (r*r + a*a)*k - a*h;
+	const T sin2theta = sin(theta)*sin(theta);
+	return a*P/delta + h/sin2theta - a*k;
+}
+
+template<typename T>
+inline T mino_dVr_dr(T r, T k, T h, T a)
+{
+	// d/dr of the radial potential V_r = -P^2 / (2 Delta)
+	const T delta = r*r - 2*r + a*a;
+	const T ddelta = 2*r - 2;
+	const T P = (r*r + a*a)*k - a*h;
+	const T dP = 2*r*k;
+	return -(2*P*dP*delta - P*P*ddelta) / (2*delta*delta);
+}
+
+template<typename T>
+inline T mino_dVtheta_dtheta(T theta, T k, T h, T a)
+{
+	// d/dtheta of the polar potential V_theta = W^2 / (2 sin^2theta),  W = h - a k sin^2theta
+	const T s = sin(theta);
+	const T c = cos(theta);
+	const T W = h - a*k*s*s;
+	const T dW = -2*a*k*s*c;
+	return W*(dW*s - W*c) / (s*s*s);
+}
+
+template<typename T>
+inline void mino_init(T r, T theta, T k, T h, T Q, int rdot_sign, int thetadot_sign, T a,
+                      T& u, T& pu, T& ptheta)
+{
+	//
+	// Canonical (u, p_u, p_theta) from a ray's position, constants of motion and direction signs.
+	// R(r) = P^2 - Delta (Q + (h - a k)^2),  Theta(theta) = Q + cos^2theta (a^2 k^2 - h^2 / sin^2theta)
+	// p_r = +/- sqrt(R) / Delta  ->  p_u = sqrt(Delta) p_r = +/- sqrt(R) / sqrt(Delta)
+	//
+	const T delta = r*r - 2*r + a*a;
+	const T P = (r*r + a*a)*k - a*h;
+	const T c = cos(theta), s = sin(theta);
+
+	T R = P*P - delta*(Q + (h - a*k)*(h - a*k));
+	if (R < 0) R = 0;
+	T Th = Q + c*c*(a*a*k*k - h*h/(s*s));
+	if (Th < 0) Th = 0;
+
+	u = mino_u_from_r(r, a);
+	pu = rdot_sign * sqrt(R) / sqrt(delta);
+	ptheta = thetadot_sign * sqrt(Th);
+}
+
+template<typename T>
+inline void mino_to_bl(T u, T pu, T theta, T ptheta, T k, T h, T a,
+                       T& r, T& pt, T& pr, T& pth, T& pphi)
+{
+	//
+	// Convert the Mino-time canonical state back to Boyer-Lindquist position r and the
+	// contravariant momenta (per affine parameter) stored in Ray<T>.
+	//
+	T sqrt_delta;
+	mino_r_from_u(u, a, r, sqrt_delta);
+	const T rhosq = r*r + (a*cos(theta))*(a*cos(theta));
+	pt   = mino_tdot(r, theta, k, h, a) / rhosq;
+	pphi = mino_phidot(r, theta, k, h, a) / rhosq;
+	pr   = sqrt_delta*pu / rhosq;
+	pth  = ptheta / rhosq;
+}
+
+// --- exact polar flow ---------------------------------------------------------
+//
+// The polar potential splits as V_theta = h^2 / (2 sin^2theta) + W(theta), with
+//   W(theta) = 1/2 a^2 k^2 sin^2theta - a k h          (bounded, smooth)
+// The part H_c = 1/2 p_theta^2 + h^2 / (2 sin^2theta) is the free particle on the
+// unit sphere with z angular momentum h and total angular momentum J = sqrt(2 H_c):
+// its flow is a great circle,  cos(theta) = A sin(psi),  A = sqrt(1 - h^2/J^2),
+// psi = J lambda_M + psi_0, and the associated phi advance (dphi/dlambda_M = h/sin^2theta)
+// integrates to sign(h) atan(|h|/J tan psi), continued across branches.
+// Using this exact flow as the polar "drift" (with only W in the kick) keeps the
+// integrator stable for rays that start or turn close to the polar axis, where
+// the h^2/sin^2theta barrier would otherwise require a tiny step.
+//
+
+template<typename T>
+inline T mino_dW_dtheta(T theta, T k, T a)
+{
+	// d/dtheta of W = 1/2 a^2 k^2 sin^2theta - a k h
+	return a*a*k*k*sin(theta)*cos(theta);
+}
+
+template<typename T>
+inline T mino_polar_phi_branch(T psi, T h, T J)
+{
+	// continuous antiderivative of h / sin^2theta along the great circle, as a function of psi
+	const T n = floor((psi + T(M_PI_2)) / T(M_PI));
+	const T sgn = (h >= 0) ? T(1) : T(-1);
+	return sgn * (atan(abs(h)/J * tan(psi - n*T(M_PI))) + n*T(M_PI));
+}
+
+template<typename T>
+inline void mino_polar_flow(T& theta, T& ptheta, T& phi, T h, T lam)
+{
+	//
+	// Advance (theta, p_theta, phi) by Mino time lam under the exact flow of
+	// H_c = 1/2 p_theta^2 + h^2 / (2 sin^2theta), including the h / sin^2theta part of dphi/dlambda_M.
+	//
+	const T s = sin(theta);
+	const T J2 = ptheta*ptheta + h*h/(s*s);
+	const T J = sqrt(J2);
+	T A2 = 1 - h*h/J2;
+	if (A2 <= T(1e-30) || J <= 0)
+	{
+		// motion confined to the equator (or no motion): theta and p_theta fixed, phi advances at h/sin^2theta
+		phi += lam * h / (s*s);
+		return;
+	}
+	const T A = sqrt(A2);
+	const T psi0 = atan2(cos(theta)/A, -s*ptheta/(J*A));
+	const T psi1 = psi0 + J*lam;
+	const T z1 = A*sin(psi1);
+	theta = acos(z1);
+	const T s1 = sin(theta);
+	ptheta = -J*A*cos(psi1)/s1;
+	// (for h = 0 the branch function reduces to n pi, i.e. phi advances by pi each time the ray
+	// passes over a pole, which is the correct h -> 0 limit)
+	phi += mino_polar_phi_branch<T>(psi1, h, J) - mino_polar_phi_branch<T>(psi0, h, J);
+}
+
+// --- diagnostics: separately conserved pieces of the Mino-time Hamiltonian, and Carter's Q ---
+
+template<typename T>
+inline T mino_hamiltonian_r(T u, T pu, T k, T h, T a)
+{
+	T r, sqrt_delta;
+	mino_r_from_u(u, a, r, sqrt_delta);
+	const T P = (r*r + a*a)*k - a*h;
+	return T(0.5)*pu*pu - P*P/(2*sqrt_delta*sqrt_delta);
+}
+
+template<typename T>
+inline T mino_hamiltonian_theta(T theta, T ptheta, T k, T h, T a)
+{
+	const T s2 = sin(theta)*sin(theta);
+	const T W = h - a*k*s2;
+	return T(0.5)*ptheta*ptheta + W*W/(2*s2);
+}
+
+template<typename T>
+inline T carter_Q(T theta, T ptheta, T k, T h, T a)
+{
+	// Carter constant from the covariant polar momentum p_theta
+	const T c = cos(theta), s = sin(theta);
+	return ptheta*ptheta + c*c*(h*h/(s*s) - a*a*k*k);
+}
+
+
 #endif /* KERR_H_ */

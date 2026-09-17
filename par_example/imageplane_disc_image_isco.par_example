@@ -20,3 +20,19 @@ q3 = 3
 
 integrator = rk45
 rk45_tol = 1e-8
+
+# Integration method: euler | rk4 | rk45 | symplectic
+# symplectic: Mino-time symplectic integrator (Stormer-Verlet / Yoshida composition).  Integrates the
+# canonical momenta directly (no sign-flip tracking), lands exactly on the disc, and sends plunging
+# rays through the horizon rather than stalling at the step limit.
+#integrator = symplectic
+# Mino-time step in the strong-field region (<= 0 or omitted: 1/precision).  0.01 is a good default;
+# 0.0025 for high accuracy near the photon sphere.
+#symp_step = 0.01
+# Composition order: 2 (Verlet), 4 or 6 (Yoshida; default 6 -- at max_tstep = 1 it is both faster and
+# more accurate than order 4 at max_tstep = 0.25)
+#symp_order = 6
+# Far-field cap on the coordinate-time step per integration step (sets the affine step at large r,
+# growing in proportion to r beyond MAXDT_RLIM = 100).  Default 1; 0.25 for ~10x better far-field
+# accuracy at ~3x the cost.
+#max_tstep = 1

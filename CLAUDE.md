@@ -53,7 +53,7 @@ cmake --build . --target gsl_test
 ./bin/gsl_test
 ```
 
-No comprehensive test framework is integrated; `gsl_test` validates the GSL dependency.
+No comprehensive test framework is integrated; `gsl_test` validates the GSL dependency. Integrator tests (all self-checking, exit status 0 on pass): `caustic_3d_test` (bundle caustic tracer: Schwarzschild caustics on the optical axis, parallel image-plane rays, δ-independence), `symplectic_unit_test` (Mino-time helpers), `integrator_compare_test` (lamppost, all integrators vs an RK45 reference), `integrator_dest_test` (ImagePlane + `DiscWithISCODestination`), `photon_ring_test` (rays offset 10⁻²–10⁻⁸ from the analytic critical curve: fate, winding number, exit direction against a fine reference and against the chaos floor), `integrator_sweep` (work–precision benchmark, CSV to `dat/`, plot with `python/integrator_sweep_plot.py`), plus the older `raytrace_rk4_test`, `emissivity_rk45_test`, `integrator_perf_test`. They need only the `raytracer`/`pointsource`/`imageplane` libraries (no cfitsio), e.g. `g++ -O2 -std=c++17 -fopenmp -I src src/tests/integrator_compare_test.cpp src/raytracer/raytracer.cpp src/raytracer/pointsource.cpp`.
 
 ## Dependencies
 
@@ -91,6 +91,7 @@ Each application picks a ray source, runs ray traces, and computes specific obse
 |---|---|---|
 | `emissivity/` | `emissivity` | Disc emissivity profiles |
 | `imageplane/` | `imageplane_disc_image` | Ray-traced disc images (FITS) |
+| `caustic/` | `caustic_3d` | 3D caustic surface of the rays reaching a distant observer (lockstep ray bundles, FITS table + sky maps; plot with `python/caustic_3d.py`, `python/caustic_3d_plotly.py`) |
 | `ray_paths/` | `trace_rays*` | Raw ray path output |
 | `outflow/` | `outflow`, `outflow_spectrum`, `pcyg*` | Wind/jet outflow and P-Cygni profiles |
 | `mapper/` | (mapper libs) | Geometric mapping, redshift/beaming |
@@ -101,7 +102,7 @@ Each application picks a ray source, runs ray traces, and computes specific obse
 
 ### Raytracer integration methods
 
-The `Raytracer` class supports three integration methods selected via `enum class Integrator { Euler, RK4, RK45 }` (defined in `raytracer.h`).
+The `Raytracer` class supports four integration methods selected via `enum class Integrator { Euler, RK4, RK45, Symplectic }` (defined in `raytracer.h`).
 
 **`run_raytrace()`** has two overloads — one with a fixed `theta_max` stopping condition and one with a `RayDestination*` — each dispatching to the appropriate `propagate*` function via a switch on the `Integrator`:
 
@@ -110,14 +111,23 @@ The `Raytracer` class supports three integration methods selected via `enum clas
 | `propagate` | Euler (fixed-step) | theta limit |
 | `propagate_rk4` | RK4 | theta limit or `RayDestination` |
 | `propagate_rk45` | RK45/DOPRI5 | theta limit or `RayDestination` |
+| `propagate_symplectic` | Mino-time symplectic (Verlet / Yoshida 4, 6) | theta limit or `RayDestination` (shared `propagate_symplectic_impl`) |
 
 - **Euler**: semi-analytic; re-derives all momenta from constants of motion `(k, h, Q)` at each position using `momentum_from_consts()` in `kerr.h`. Does not integrate momenta directly.
 - **RK4**: classical 4th-order Runge-Kutta with fixed step size; evaluates `momentum_from_consts()` at 4 trial positions.
 - **RK45**: adaptive Dormand-Prince (DOPRI5) with mixed absolute/relative error control. Tolerance tunable via `set_rk45_tol()` (default `1e-8`). Step limit `RK45_STEPLIM=100,000` (vs `STEPLIM=10,000,000` for fixed-step methods). FSAL not used — k1 recomputed each step to keep sign-flip logic consistent.
 
+- **Symplectic**: integrates the canonical Mino-time Hamiltonian system `(u, p_u, θ, p_θ)` with `r = 1 + √(1−a²) cosh u` (helpers `mino_*` in `kerr.h`), so momenta evolve continuously through turning points with no sign-flip tracking; `Q` is conserved only to truncation error (diagnostic via `carter_Q()`). Kick/drift Störmer-Verlet with Yoshida composition, order set by `set_symplectic_order(2|4|6)` (default 6); the polar `h²/sin²θ` barrier is handled by an exact great-circle flow (`mino_polar_flow()`), so near-axis sources are fine. Step: fixed Mino-time step `set_symplectic_step()` (default `1/precision`) in the strong field, capped by `max_tstep`/`max_phistep` beyond `2 r₊`; the cap grows ∝ `r` beyond `maxtstep_rlim` (default `MAXDT_RLIM = 100`), so the far field costs `O(log r_max)` steps. Work–precision sweep: `integrator_sweep` + `python/integrator_sweep_plot.py`. Boundaries (theta limit, `rlim`, `RayDestination::reached()`) are hit exactly by bisection on the full composed step. Horizon is declared at `u < SYMP_U_HORIZON`. Step limit `SYMP_STEPLIM = 1,000,000`. Par-file parameters in the applications: `integrator = symplectic`, `symp_step`, `symp_order`, `max_tstep`. Design notes and benchmarks: `docs/plan_symplectic_integrator.md`.
+
+**Known issue in the Euler/RK4/RK45 propagators** (found 2026-09 with `integrator_compare_test`): rays emitted near a radial turning point (`|cos α| ≲ 0.1`) that initially head towards the polar axis undergo a spurious radial sign flip when the polar flip fires and land at the wrong radius (~4% of lamppost rays at `θ_source = 10⁻³`). The symplectic integrator does not have this problem. RK45 also stalls at its step limit on plunging rays and loops forever on a ray with NaN constants of motion (the `x = y = 0` image-plane ray).
+
 **Sign-flip mechanism**: `rdot_sign` and `thetadot_sign` track direction reversals of dr/dλ and dθ/dλ. Flips are gated by boolean `r_was_positive` / `theta_was_positive` flags — a flip is allowed as soon as `rdotsq`/`thetadotsq` turns positive again (replacing an older `COUNT_MIN=100` consecutive-steps guard).
 
 **Ray status** is stored as bitwise flags in `ray.status`: `RAY_STATUS_DEST`, `RAY_STATUS_HORIZON`, `RAY_STATUS_RLIM`, `RAY_STATUS_STEPLIM`, `RAY_STATUS_ERGO`, `RAY_STATUS_NEG_ENERGY`. Failed rays have `ray.steps` negated.
+
+### Mino-time stepper (`src/raytracer/mino_stepper.h`)
+
+The Störmer–Verlet substep, the Yoshida 4/6 composition (`MinoStepper<T>::step()`) and the far-field step-size policy (`mino_step_size()`) are shared between `Raytracer::propagate_symplectic_impl` and applications that drive the step themselves. `caustic_3d` (`src/caustic/caustic_bundle.h`) advances a bundle of five rays per pixel in lockstep, forms the Jacobian of the ray family `det[∂X/∂x, ∂X/∂y, dX/dτ]` by central differences and bisects its sign changes to locate caustic crossings; the bundle is kept linear through photon-shell orbits by rescaling the offset rays' deviation (including `h`). Design and results: `docs/plan_caustic_3d.md`; test: `caustic_3d_test` (Schwarzschild caustics on the optical axis).
 
 ### ImagePlane backward-time tracing
 
@@ -130,6 +140,8 @@ raytrace_source.redshift(-1.0, true);           // reverse=true required — dis
 ```
 
 `ImagePlane::redshift_start()` already handles `reverse=true` internally. The explicit `true` is only needed on the `redshift()` call. Omitting it silently produces wrong redshift values.
+
+**Image-plane orientation (fixed 2026-09-10):** the ray from plane position `(x, y)` now passes the black hole on the `(x, y)` side — `x = α = −h_phys / sin i` (Cunningham & Bardeen; the shadow of a prograde hole is displaced to `x ≈ +2a sin i`), `y = β` towards the pole — and the rays are parallel (the family's Jacobian is constant in the far field). Before the fix the constants of motion belonged to the `(−x, −y)` ray, so the family converged through a focus at `dist/2` (equivalent to an observer at `dist/2` with an inverted image; `flip_image` compensated the vertical inversion). `flip_image` now defaults to `0` in the `imageplane_disc_image*` applications.
 
 ### Adding a new application
 

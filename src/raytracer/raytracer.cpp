@@ -6,6 +6,7 @@
  */
 
 #include "raytracer.h"
+#include "mino_stepper.h"
 #include "ray_destination.h"
 #include <cassert>
 
@@ -19,6 +20,8 @@ Raytracer<T>::Raytracer( int num_rays, T spin_par, T init_precision, T init_max_
 	, max_tstep(init_max_tstep)
     , maxtstep_rlim(MAXDT_RLIM)
     , rk45_tol(T(1e-8))
+    , symp_step(T(0))
+    , symp_order(6)
 {
 	//
 	// Constructor function - allocates host and device memory for each ray to store ray position, momentum,
@@ -70,13 +73,16 @@ void Raytracer<T>::run_raytrace(Integrator method, T theta_max, T r_max,
     //   Integrator::Euler — fixed-step Euler integrator (default)
     //   Integrator::RK4   — classical 4th-order Runge-Kutta
     //   Integrator::RK45  — adaptive Dormand-Prince RK45/DOPRI5
+    //   Integrator::Symplectic — Mino-time symplectic integrator (Störmer-Verlet / Yoshida)
     //
     static const char* names[] = {
         "Running raytracer...",
         "Running raytracer (RK4)...",
-        "Running raytracer (RK45/DOPRI5)..."
+        "Running raytracer (RK45/DOPRI5)...",
+        "Running raytracer (symplectic)..."
     };
-    const int steplim = (method == Integrator::RK45) ? RK45_STEPLIM : STEPLIM;
+    const int steplim = (method == Integrator::RK45) ? RK45_STEPLIM
+                      : (method == Integrator::Symplectic) ? SYMP_STEPLIM : STEPLIM;
     cout << names[static_cast<int>(method)] << endl;
 
     ProgressBar prog(nRays, "Ray", 0, (show_progress > 0));
@@ -94,6 +100,7 @@ void Raytracer<T>::run_raytrace(Integrator method, T theta_max, T r_max,
                 case Integrator::Euler: propagate    (ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
                 case Integrator::RK4:  propagate_rk4 (ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
                 case Integrator::RK45: propagate_rk45(ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
             }
             outfile->newline(2);
         }
@@ -119,6 +126,7 @@ void Raytracer<T>::run_raytrace(Integrator method, T theta_max, T r_max,
                 case Integrator::Euler: propagate    (ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
                 case Integrator::RK4:  propagate_rk4 (ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
                 case Integrator::RK45: propagate_rk45(ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
             }
         }
     }
@@ -970,15 +978,17 @@ void Raytracer<T>::run_raytrace(RayDestination<T>* dest, Integrator method, T r_
     //
     // Unified ray tracing entry point with user-supplied stopping criterion.
     // Accepts a RayDestination object whose reached(r, theta, phi) method is called after each step.
-    // Supports Integrator::RK4 and Integrator::RK45; Euler has no RayDestination propagate variant.
+    // Supports Integrator::RK4, Integrator::RK45 and Integrator::Symplectic; Euler has no RayDestination propagate variant.
     //
     assert(method != Integrator::Euler && "Integrator::Euler does not support RayDestination stopping conditions");
     static const char* names[] = {
         "",                              // Euler — not supported here
         "Running raytracer (RK4)...",
-        "Running raytracer (RK45/DOPRI5)..."
+        "Running raytracer (RK45/DOPRI5)...",
+        "Running raytracer (symplectic)..."
     };
-    const int steplim = (method == Integrator::RK45) ? RK45_STEPLIM : STEPLIM;
+    const int steplim = (method == Integrator::RK45) ? RK45_STEPLIM
+                      : (method == Integrator::Symplectic) ? SYMP_STEPLIM : STEPLIM;
     cout << names[static_cast<int>(method)] << endl;
 
     ProgressBar prog(nRays, "Ray", 0, (show_progress > 0));
@@ -994,6 +1004,7 @@ void Raytracer<T>::run_raytrace(RayDestination<T>* dest, Integrator method, T r_
             switch (method) {
                 case Integrator::RK4:  propagate_rk4 (ray, r_max, dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
                 case Integrator::RK45: propagate_rk45(ray, r_max, dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
                 default: break;
             }
             outfile->newline(2);
@@ -1018,6 +1029,7 @@ void Raytracer<T>::run_raytrace(RayDestination<T>* dest, Integrator method, T r_
             switch (method) {
                 case Integrator::RK4:  propagate_rk4 (ray, r_max, dest, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
                 case Integrator::RK45: propagate_rk45(ray, r_max, dest, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, dest, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
                 default: break;
             }
         }
@@ -1874,6 +1886,259 @@ inline int Raytracer<T>::propagate_rk45(int ray, const T rlim, RayDestination<T>
     if (rays[ray].status & RAY_STATUS_STEPLIM)
         rays[ray].steps = -rays[ray].steps;   // negative steps flags a stuck/failed ray
     return steps;
+}
+
+// =============================================================================
+// Symplectic (Mino-time) integrator
+// =============================================================================
+//
+// Integrates the canonical Mino-time system (see the Mino-time helpers in kerr.h):
+//
+//   H_M = 1/2 p_u^2 + 1/2 p_theta^2 + V_r(u) + V_theta(theta) = 0,   d lambda_M = d lambda / rhosq
+//
+// with r = 1 + b cosh(u), b = sqrt(1 - a^2).  Unlike the Euler/RK propagators the momenta are
+// integrated directly (no square roots of R(r) and Theta(theta), so no sign-flip tracking), and
+// the constants of motion k and h enter only through the potentials; Q is conserved by the
+// integrator to within its truncation error and can be used as a diagnostic (carter_Q()).
+//
+// One step is a composition of Störmer-Verlet substeps kick(h/2) drift(h) kick(h/2):
+//   kick  — momentum updates from dV_r/du and dW/dtheta, plus the t and phi quadratures
+//   drift — free radial drift u += h p_u and the exact great-circle polar flow
+//           (mino_polar_flow, which handles the h^2/sin^2theta barrier near the polar axis)
+// Composition weights: order 2 = {1}; order 4 = Yoshida {w1, w0, w1}; order 6 = Yoshida
+// solution A {w3, w2, w1, w0, w1, w2, w3} (Yoshida 1990, Phys. Lett. A 150, 262).
+//
+// Step size: fixed Mino-time step h0 (set_symplectic_step, default 1/precision) so that the
+// integration is exactly symplectic in the strong-field region, capped far from the black hole
+// by max_tstep / |dt/dlambda_M| and max_phistep / |dphi/dlambda_M| (at large r this is a constant
+// affine step of max_tstep, which is needed because a fixed Mino step reaches r = infinity in
+// finite Mino time).  The cap is applied at all radii (MAXDT_RLIM is not used here).
+//
+// Termination: when a full composed step crosses the theta limit or rlim, the step length that
+// lands exactly on the boundary is found by bisection on the full composed step (so the ray
+// finishes on the surface with consistent t, phi and momenta), then theta / r is snapped to the
+// boundary value.  Horizon: u <= 0 or r <= horizon after a step.
+//
+
+template <typename T>
+inline int Raytracer<T>::propagate_symplectic_impl(int ray, const T rlim, const T thetalim, RayDestination<T>* dest,
+                                                    const int steplim, TextOutput* outfile, int write_step,
+                                                    T write_rmax, T write_rmin, bool write_cartesian)
+{
+    //
+    // Shared implementation of both propagate_symplectic() overloads.  If dest is non-null the ray is
+    // stopped when dest->reached(r, theta, phi, theta_prev) becomes true and thetalim is ignored;
+    // otherwise the fixed theta limit is used (thetalim > 0: stop at theta >= thetalim; thetalim < 0:
+    // stop at theta <= |thetalim|; thetalim == 0: no theta limit).
+    //
+    int steps = 0;
+
+    T x, y, z;
+
+    const T a = spin;
+    const T b = mino_b<T>(a);
+    const T k = rays[ray].k;
+    const T h = rays[ray].h;   // z-angular momentum constant of motion
+    const T Q = rays[ray].Q;
+
+    int rdot_flips           = rays[ray].rdot_flips;
+    int equatorial_crossings = rays[ray].equatorial_crossings;
+
+    // canonical Mino-time state
+    typedef MinoState<T> State;
+    State s;
+    s.t   = rays[ray].t;
+    s.phi = rays[ray].phi;
+    s.theta = rays[ray].theta;
+    mino_init<T>(rays[ray].r, rays[ray].theta, k, h, Q, rays[ray].rdot_sign, rays[ray].thetadot_sign, a,
+                 s.u, s.pu, s.ptheta);
+    T r, sqrt_delta;
+    mino_r_from_u<T>(s.u, a, r, sqrt_delta);
+
+    MinoStepper<T> stepper(a, k, h, symp_order);
+
+    const T h0 = get_symplectic_step();
+    // The max_tstep / max_phistep caps are only applied outside r_cap.  Close to the horizon
+    // dt/dlambda_M diverges (t -> infinity as r -> r+), so a coordinate-time cap there would make
+    // an infalling ray creep towards the horizon in ever smaller steps without ever reaching it;
+    // with the fixed Mino step it simply overshoots to u <= 0 and is flagged.
+    const T r_cap = 2 * horizon;
+
+    // one full composed step of Mino time hstep (sets stepper.hit_horizon)
+    auto composed_step = [&](State& q, T hstep) { stepper.step(q, hstep); };
+    // boundary predicates on a trial state (theta_prev is theta at the start of the current step)
+    auto theta_crossed = [&](const State& q, T theta_prev)
+    {
+        if (dest != nullptr)
+            return dest->reached(1 + b*cosh(q.u), q.theta, q.phi, theta_prev);
+        return (thetalim > 0 && q.theta >= thetalim) || (thetalim < 0 && q.theta <= abs(thetalim));
+    };
+    auto r_crossed = [&](const State& q)
+    {
+        return rlim > 0 && (1 + b*cosh(q.u)) >= rlim;
+    };
+
+    bool write_started = false;
+
+    // --- Main integration loop ---
+    while (r < rlim
+           && (dest != nullptr || (thetalim > 0 && s.theta < thetalim) || (thetalim < 0 && s.theta > abs(thetalim)) || thetalim == 0)
+           && steps < steplim)
+    {
+        ++steps;
+
+        const T rhosq = r*r + (a*cos(s.theta))*(a*cos(s.theta));
+
+        // --- step size: fixed Mino step, capped by the coordinate-time and phi steps ---
+        // Far-field policy (mino_step_size in mino_stepper.h): inside maxtstep_rlim the coordinate-time
+        // step is capped at max_tstep (a constant affine step at large r); beyond it the cap grows in
+        // proportion to r, i.e. the radial step becomes a fixed fraction of r, as for the Euler/RK4 step
+        // heuristic.  Pass a very large rlim to set_max_tstep() to keep the constant cap all the way out.
+        T tdot, phidot;
+        const T step = mino_step_size<T>(r, s.theta, k, h, a, h0, r_cap, max_tstep, maxtstep_rlim, max_phistep, tdot, phidot);
+
+        // --- physicality flags (same criteria as the other propagators) ---
+        {
+            const T pt   = tdot / rhosq;
+            const T pphi = phidot / rhosq;
+            if (pt <= 0)
+                rays[ray].status |= RAY_STATUS_ERGO;
+            if ((1 - 2*r/rhosq)*pt + (2*a*r*sin(s.theta)*sin(s.theta)/rhosq)*pphi < 0)
+                rays[ray].status |= RAY_STATUS_NEG_ENERGY;
+        }
+
+        // --- take the step ---
+        const State s_prev = s;
+        composed_step(s, step);
+
+        // --- exact landing on the theta limit or rlim: bisection on the full composed step ---
+        bool reached_dest = false, reached_rlim = false;
+        if (!stepper.hit_horizon && (theta_crossed(s, s_prev.theta) || r_crossed(s)))
+        {
+            T lo = 0, hi = step;
+            State trial;
+            for (int it = 0; it < 60 && (hi - lo) > T(1e-13)*step; it++)
+            {
+                const T mid = (lo + hi) / 2;
+                trial = s_prev;
+                composed_step(trial, mid);
+                if (stepper.hit_horizon || theta_crossed(trial, s_prev.theta) || r_crossed(trial)) hi = mid; else lo = mid;
+            }
+            s = s_prev;
+            composed_step(s, hi);
+            // snap onto the boundary that was reached (a fixed theta limit or rlim; a general
+            // RayDestination surface is left where the bisection put it, within 1e-13 of a step)
+            if (!stepper.hit_horizon)
+            {
+                if (theta_crossed(s, s_prev.theta))
+                {
+                    reached_dest = true;
+                    if (dest == nullptr) s.theta = (thetalim > 0) ? thetalim : abs(thetalim);
+                }
+                else
+                {
+                    reached_rlim = true;
+                    s.u = mino_u_from_r<T>(rlim, a);
+                }
+            }
+        }
+
+        // --- bookkeeping ---
+        if (s_prev.pu * s.pu < 0) rdot_flips++;
+        if ((s_prev.theta < M_PI_2 && s.theta >= M_PI_2) || (s_prev.theta > M_PI_2 && s.theta <= M_PI_2))
+            ++equatorial_crossings;
+
+        if (!isfinite(s.u) || !isfinite(s.theta) || !isfinite(s.pu) || !isfinite(s.ptheta))
+        {
+            // numerical breakdown: restore the last good state and flag the ray as failed
+            s = s_prev;
+            mino_r_from_u<T>(s.u, a, r, sqrt_delta);
+            rays[ray].status |= RAY_STATUS_STEPLIM;
+            break;
+        }
+        mino_r_from_u<T>(s.u, a, r, sqrt_delta);
+        if (stepper.hit_horizon || r <= horizon)
+        {
+            rays[ray].status |= RAY_STATUS_HORIZON;
+            break;
+        }
+        if (reached_rlim)
+        {
+            r = rlim;   // snapped onto the outer boundary (u -> r round-off could otherwise leave r just below rlim)
+            break;
+        }
+        if (dest != nullptr && reached_dest)
+        {
+            rays[ray].status |= RAY_STATUS_DEST;
+            break;
+        }
+
+        if (outfile != nullptr && (steps % write_step) == 0)
+        {
+            if ((write_rmax < 0 || r < write_rmax) && (write_rmin < 0 || r > write_rmin))
+            {
+                write_started = true;
+                if (write_cartesian)
+                {
+                    cartesian<T>(x, y, z, r, s.theta, s.phi, a);
+                    (*outfile) << s.t << x << y << z << endl;
+                }
+                else
+                {
+                    (*outfile) << s.t << r << s.theta << s.phi << endl;
+                }
+            }
+            else if (write_started)
+            {
+                break;
+            }
+        }
+    }  // end main loop
+
+    if (steps >= steplim)
+        rays[ray].status |= RAY_STATUS_STEPLIM;
+    else if (r >= rlim)
+        rays[ray].status |= RAY_STATUS_RLIM;
+    else if (dest == nullptr && ((thetalim > 0 && s.theta >= thetalim) || (thetalim < 0 && s.theta <= abs(thetalim))))
+        rays[ray].status |= RAY_STATUS_DEST;
+
+    // --- write back in the Boyer-Lindquist / contravariant form used by the rest of the code ---
+    T pt, pr, pth, pphi;
+    mino_to_bl<T>(s.u, s.pu, s.theta, s.ptheta, k, h, a, r, pt, pr, pth, pphi);
+
+    rays[ray].t      = s.t;
+    rays[ray].r      = r;
+    rays[ray].theta  = s.theta;
+    rays[ray].phi    = s.phi;
+    rays[ray].pt     = pt;
+    rays[ray].pr     = pr;
+    rays[ray].ptheta = pth;
+    rays[ray].pphi   = pphi;
+    rays[ray].rdot_sign     = (s.pu >= 0) ? 1 : -1;
+    rays[ray].thetadot_sign = (s.ptheta > 0) ? 1 : -1;
+    rays[ray].rdot_flips    = rdot_flips;
+    rays[ray].equatorial_crossings = equatorial_crossings;
+
+    if (steps > 0) rays[ray].steps += steps;
+    if (rays[ray].status & RAY_STATUS_STEPLIM)
+        rays[ray].steps = -rays[ray].steps;   // negative steps flags a stuck/failed ray
+    return steps;
+}
+
+template <typename T>
+inline int Raytracer<T>::propagate_symplectic(int ray, const T rlim, const T thetalim, const int steplim,
+                                               TextOutput* outfile, int write_step,
+                                               T write_rmax, T write_rmin, bool write_cartesian)
+{
+    return propagate_symplectic_impl(ray, rlim, thetalim, nullptr, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian);
+}
+
+template <typename T>
+inline int Raytracer<T>::propagate_symplectic(int ray, const T rlim, RayDestination<T>* dest, const int steplim,
+                                               TextOutput* outfile, int write_step,
+                                               T write_rmax, T write_rmin, bool write_cartesian)
+{
+    return propagate_symplectic_impl(ray, rlim, T(0), dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian);
 }
 
 template class Raytracer<double>;
