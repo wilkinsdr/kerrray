@@ -4,6 +4,7 @@ obj
 lib
 dat
 par
+build
 
 # make sure we don't get the binaries in tests and util
 src/tests/*
@@ -32,6 +33,7 @@ cmake.local
 .DS_Store
 .wq
 .settings
+*.ninja*
 
 # dat output files
 *.fits
@@ -61,3 +63,6 @@ build/.ninja_log
 build/build.ninja
 build/compile_commands.json
 build/.ninja_deps
+build/.ninja_deps
+build/.ninja_deps
+build/.ninja_log

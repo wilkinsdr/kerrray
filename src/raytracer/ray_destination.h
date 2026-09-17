@@ -151,4 +151,56 @@ public:
     }
 };
 
+// Flat source plane perpendicular to the observer-BH line of sight, located at
+// distance z_s behind the BH (on the far side from the observer).
+//
+// The observer direction unit vector is n = (sin(incl)*cos(phi0),
+// sin(incl)*sin(phi0), cos(incl)) in Cartesian coordinates aligned with the BH
+// spin axis.  The plane is defined by the equation
+//
+//   d(r,θ,φ) = r*(sin(θ)*sin(incl)*cos(φ-φ0) + cos(θ)*cos(incl)) = -z_s
+//
+// reached() returns true when d ≤ -z_s, i.e. the ray has crossed onto the far
+// side.  The initial observer position has d ≈ +dist, so the condition never
+// fires until the ray has passed through/around the BH.
+//
+// source_coords() converts the ray's Boyer-Lindquist position to Cartesian
+// (x_s, y_s) on the plane, using the same East/North orientation as the image
+// plane:
+//   x_s (East):  e1 = (-sin(phi0),           cos(phi0),         0         )
+//   y_s (North): e2 = (-cos(incl)*cos(phi0), -cos(incl)*sin(phi0), sin(incl))
+template <typename T>
+class FlatPlaneDestination : public RayDestination<T> {
+public:
+    T incl;   // observer inclination (radians)
+    T phi0;   // observer azimuthal angle (radians)
+    T z_s;    // source plane distance behind BH (positive, gravitational radii)
+
+    FlatPlaneDestination(T incl, T phi0, T z_s)
+        : incl(incl), phi0(phi0), z_s(z_s) {}
+
+    // Signed projection of the position vector along the observer direction.
+    // Positive = observer side; negative = far side.
+    T projection(T r, T theta, T phi) const {
+        return r * (sin(theta)*sin(incl)*cos(phi - phi0) + cos(theta)*cos(incl));
+    }
+
+    bool reached(T r, T theta, T phi) const override {
+        return projection(r, theta, phi) <= -z_s;
+    }
+
+    // Convert a Boyer-Lindquist position to source-plane Cartesian coordinates.
+    // Use rd.phi (accumulated, not range_phi()-wrapped) — cos/sin are periodic
+    // so the result is equivalent to using the normalised phi.
+    void source_coords(T r, T theta, T phi, T& x_s, T& y_s) const {
+        const T X = r * sin(theta) * cos(phi);
+        const T Y = r * sin(theta) * sin(phi);
+        const T Z = r * cos(theta);
+        // East: e1 = (-sin(phi0), cos(phi0), 0)
+        x_s = -X * sin(phi0) + Y * cos(phi0);
+        // North: e2 = (-cos(incl)*cos(phi0), -cos(incl)*sin(phi0), sin(incl))
+        y_s = -X * cos(incl)*cos(phi0) - Y * cos(incl)*sin(phi0) + Z * sin(incl);
+    }
+};
+
 #endif /* RAY_DESTINATION_H_ */

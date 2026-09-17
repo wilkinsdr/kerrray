@@ -1,0 +1,75 @@
+# caustic_sourceplane.par
+#
+# Parameters for caustic structure mapping in Kerr spacetime via a source sphere.
+#
+# Traces rays backward from the observer image plane to a source sphere at r_lim.
+# Unlike caustic_discplane (which stops at the accretion disc), this code lets
+# rays propagate freely and captures the full caustic structure for all source
+# positions on the sky behind the black hole.
+#
+# The Jacobian J = d(theta_s, phi_s)/d(x_img, y_img) is computed at each image
+# plane pixel.  Zero-crossings of det(J) are critical curves in the image plane;
+# their (theta_s, phi_s) coordinates give the caustics on the source sphere.
+#
+# Image order is floor(|phi_accumulated| / pi): 0 = direct image, 1 = first
+# photon ring, etc.  Order boundaries are also flagged as critical curves.
+#
+# Copy this file to par/caustic_sourceplane.par and edit as needed.
+# Run from the project root:
+#   ./bin/caustic_sourceplane --parfile=par/caustic_sourceplane.par
+#
+
+# Output FITS file (path relative to bin/ or use absolute path)
+outfile = ../dat/caustic_sourceplane.fits
+
+# Observer distance (gravitational radii).
+# Must be large enough that the image plane approximation is valid (>= 500 rg).
+dist = 500
+
+# Observer inclination (degrees from spin axis; 0 = face-on, 90 = edge-on)
+incl = 30
+
+# Azimuthal orientation of the image plane (radians; 0 = default)
+plane_phi0 = 0
+
+# Black hole spin parameter a/M (0 = Schwarzschild, 0.998 = near-maximal Kerr)
+spin = 0.998
+
+# Source sphere radius (gravitational radii).
+# Rays that reach r_lim are considered escaped.  Must be >= dist.
+# Default (if omitted): 1.5 * dist.
+r_lim = 1000
+
+# Image plane extent (gravitational radii).
+# Set x0/xmax to cover the region of interest:
+#   +-20 rg covers the photon ring and nearby caustic structure.
+#   +-5 rg  zooms into the inner shadow boundary.
+x0   = -20
+xmax =  20
+y0   = -20
+ymax =  20
+
+# Image plane resolution.
+# 500x500 gives good caustic detail; use 200x200 for a quick preview.
+# Higher resolution sharpens critical curves but increases runtime quadratically.
+Nx = 500
+Ny = 500
+
+# Integration method: rk4 | rk45
+# rk45 is recommended — adaptive step size handles the photon sphere well.
+integrator = rk45
+
+# RK45 per-step error tolerance (smaller = more accurate, more steps).
+# 1e-8 is a good default; reduce to 1e-10 for higher photon-ring orders.
+rk45_tol = 1e-8
+
+# Maximum integration steps per ray (-1 = use integrator default).
+# Default for RK45: 100000; for RK4/Euler: 10000000.
+# Increase if shadow rays are being terminated before reaching the horizon.
+# steplim = -1
+
+# Fixed-step integrator precision parameter (only used for rk4).
+precision = 100
+
+# Show progress bar (1 = yes, 0 = no)
+show_progress = 1

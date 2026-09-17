@@ -1,0 +1,81 @@
+# caustic_plane.par
+#
+# Parameters for caustic structure mapping in Kerr spacetime via a flat source
+# plane located behind the black hole.
+#
+# Traces rays backward from the observer image plane to a flat plane at
+# distance z_s behind the BH, perpendicular to the observer-BH line of sight.
+# This is the standard gravitational-lensing "source plane."
+#
+# Using Cartesian source-plane coordinates (x_s, y_s) avoids the phi = ±pi
+# branch-cut artefacts that appear in caustic_sourceplane.  The Jacobian
+# J = d(x_s, y_s)/d(x_img, y_img) has no coordinate singularity, so critical
+# curves (zero-crossings of det J) are identified cleanly.
+#
+# Only rays that actually cross the source plane are recorded.  Near-side
+# background rays and shadow rays are excluded automatically, since they
+# never reach d = -z_s.
+#
+# Copy this file to par/caustic_plane.par and edit as needed.
+# Run from the project root:
+#   ./bin/caustic_plane --parfile=par/caustic_plane.par
+#
+
+# Output FITS file (path relative to bin/ or use absolute path)
+outfile = ../dat/caustic_plane.fits
+
+# Observer distance (gravitational radii).
+dist = 500
+
+# Observer inclination (degrees from spin axis; 0 = face-on, 90 = edge-on)
+incl = 30
+
+# Azimuthal orientation of the image plane (radians; 0 = default)
+plane_phi0 = 0
+
+# Black hole spin parameter a/M (0 = Schwarzschild, 0.998 = near-maximal Kerr)
+spin = 0.998
+
+# Source plane distance behind the BH (gravitational radii; positive).
+# Default (if omitted): equal to dist.
+z_s = 500
+
+# Maximum ray propagation radius (gravitational radii).
+# Must be large enough for strongly deflected rays to reach the source plane.
+# Default (if omitted): 4 * z_s.
+# r_max = 2000
+
+# Image plane extent (gravitational radii).
+x0   = -20
+xmax =  20
+y0   = -20
+ymax =  20
+
+# Image plane resolution.
+# 500x500 gives good caustic detail; use 200x200 for a quick preview.
+Nx = 500
+Ny = 500
+
+# Integration method: rk4 | rk45
+# rk45 is recommended.  Euler is not supported with FlatPlaneDestination.
+integrator = rk45
+
+# RK45 per-step error tolerance (smaller = more accurate, more steps).
+rk45_tol = 1e-8
+
+# Maximum integration steps per ray (-1 = use integrator default).
+# steplim = -1
+
+# Fixed-step integrator precision parameter (only used for rk4).
+precision = 100
+
+# Show progress bar (1 = yes, 0 = no)
+show_progress = 1
+
+# Bundle Jacobian satellite offset as fraction of pixel spacing (default 0.01).
+# Each pixel traces 4 extra satellite rays at ±eps_x and ±eps_y, enabling much
+# more accurate local Jacobian derivatives than the grid-neighbour method, and
+# avoiding SENTINEL gaps near critical curves where grid neighbours land in
+# different image-order shells.
+# Set to 0 to fall back to the original grid-neighbour finite differences.
+bundle_eps_frac = 0.01

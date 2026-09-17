@@ -128,15 +128,19 @@ public:
     Raytracer( int num_rays, T spin, T precision = PRECISION, T init_max_phistep = MAXDPHI, T init_max_tstep = MAXDT );
     ~Raytracer( );
 
+    // steplim: maximum integration steps per ray.  Pass -1 (default) to use the
+    // integrator's built-in limit (STEPLIM for Euler/RK4, RK45_STEPLIM for RK45).
     void run_raytrace(Integrator method = Integrator::Euler, T theta_max = M_PI / 2, T r_max = 1000,
                       int show_progress = 1, TextOutput* outfile = 0,
-                      int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
+                      int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true,
+                      int steplim = -1);
     inline int propagate(int ray, const T rlim, const T thetalim, const int steplim, TextOutput* outfile = 0
                          , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
 
     void run_raytrace(RayDestination<T>* dest, Integrator method = Integrator::Euler, T r_max = 1000,
                       int show_progress = 1, TextOutput* outfile = 0,
-                      int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
+                      int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true,
+                      int steplim = -1);
     inline int propagate_rk4(int ray, const T rlim, const T thetalim, const int steplim, TextOutput* outfile = 0
                               , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
     inline int propagate_rk4(int ray, const T rlim, RayDestination<T>* dest, const int steplim, TextOutput* outfile = 0
