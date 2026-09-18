@@ -82,8 +82,10 @@ void Raytracer<T>::run_raytrace(Integrator method, T theta_max, T r_max,
         "Running raytracer (RK45/DOPRI5)...",
         "Running raytracer (symplectic)..."
     };
-    const int steplim = (method == Integrator::RK45) ? RK45_STEPLIM
-                      : (method == Integrator::Symplectic) ? SYMP_STEPLIM : STEPLIM;
+    // step limit: the caller's value if positive, otherwise the default for the integrator
+    const int effective_steplim = (steplim > 0) ? steplim
+                                : (method == Integrator::RK45) ? RK45_STEPLIM
+                                : (method == Integrator::Symplectic) ? SYMP_STEPLIM : STEPLIM;
     cout << names[static_cast<int>(method)] << endl;
 
     ProgressBar prog(nRays, "Ray", 0, (show_progress > 0));
@@ -98,10 +100,10 @@ void Raytracer<T>::run_raytrace(Integrator method, T theta_max, T r_max,
             else if (rays[ray].steps >= effective_steplim) continue;
 
             switch (method) {
-                case Integrator::Euler: propagate    (ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::RK4:  propagate_rk4 (ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::RK45: propagate_rk45(ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::Symplectic: propagate_symplectic(ray, r_max, theta_max, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Euler: propagate    (ray, r_max, theta_max, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK4:  propagate_rk4 (ray, r_max, theta_max, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK45: propagate_rk45(ray, r_max, theta_max, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, theta_max, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
             }
             outfile->newline(2);
         }
@@ -124,10 +126,10 @@ void Raytracer<T>::run_raytrace(Integrator method, T theta_max, T r_max,
             else if (rays[ray].steps >= effective_steplim) continue;
 
             switch (method) {
-                case Integrator::Euler: propagate    (ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::RK4:  propagate_rk4 (ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::RK45: propagate_rk45(ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::Symplectic: propagate_symplectic(ray, r_max, theta_max, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Euler: propagate    (ray, r_max, theta_max, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK4:  propagate_rk4 (ray, r_max, theta_max, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK45: propagate_rk45(ray, r_max, theta_max, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, theta_max, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
             }
         }
     }
@@ -995,8 +997,10 @@ void Raytracer<T>::run_raytrace(RayDestination<T>* dest, Integrator method, T r_
         "Running raytracer (RK45/DOPRI5)...",
         "Running raytracer (symplectic)..."
     };
-    const int steplim = (method == Integrator::RK45) ? RK45_STEPLIM
-                      : (method == Integrator::Symplectic) ? SYMP_STEPLIM : STEPLIM;
+    // step limit: the caller's value if positive, otherwise the default for the integrator
+    const int effective_steplim = (steplim > 0) ? steplim
+                                : (method == Integrator::RK45) ? RK45_STEPLIM
+                                : (method == Integrator::Symplectic) ? SYMP_STEPLIM : STEPLIM;
     cout << names[static_cast<int>(method)] << endl;
 
     ProgressBar prog(nRays, "Ray", 0, (show_progress > 0));
@@ -1010,9 +1014,9 @@ void Raytracer<T>::run_raytrace(RayDestination<T>* dest, Integrator method, T r_
             else if (rays[ray].steps >= effective_steplim) continue;
 
             switch (method) {
-                case Integrator::RK4:  propagate_rk4 (ray, r_max, dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::RK45: propagate_rk45(ray, r_max, dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::Symplectic: propagate_symplectic(ray, r_max, dest, steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK4:  propagate_rk4 (ray, r_max, dest, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK45: propagate_rk45(ray, r_max, dest, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, dest, effective_steplim, outfile, write_step, write_rmax, write_rmin, write_cartesian); break;
                 default: break;
             }
             outfile->newline(2);
@@ -1035,9 +1039,9 @@ void Raytracer<T>::run_raytrace(RayDestination<T>* dest, Integrator method, T r_
             else if (rays[ray].steps >= effective_steplim) continue;
 
             switch (method) {
-                case Integrator::RK4:  propagate_rk4 (ray, r_max, dest, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::RK45: propagate_rk45(ray, r_max, dest, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
-                case Integrator::Symplectic: propagate_symplectic(ray, r_max, dest, steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK4:  propagate_rk4 (ray, r_max, dest, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::RK45: propagate_rk45(ray, r_max, dest, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
+                case Integrator::Symplectic: propagate_symplectic(ray, r_max, dest, effective_steplim, nullptr, write_step, write_rmax, write_rmin, write_cartesian); break;
                 default: break;
             }
         }

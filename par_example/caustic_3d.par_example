@@ -55,6 +55,15 @@ delta = 1e-4
 # Maximum number of caustic crossings stored per ray (all crossings are still counted in NCAUST)
 max_caustics = 32
 
+# Adaptive refinement of the image plane: after the regular grid, cells whose corner rays differ in the number
+# of caustic crossings or in their fate (escaped / captured) are split in four and the new points traced, this
+# many times (0 = off).  The pixel spacing along the critical curve, where the caustic tubes are produced,
+# becomes dx / 2^refine_levels at a fraction of the cost of a uniform grid (e.g. 81x81 with 2 levels ~ 25k
+# points instead of 103k for 321x321).  The per-pixel images stay on the regular grid; the CAUSTICS table
+# holds the crossings of all points (LEVEL column; IX, IY in units of the finest spacing) and the POINTS
+# table lists every point traced.
+refine_levels = 0
+
 # Symplectic (Mino-time) integrator settings -- the bundle tracer always uses this integrator.
 # Mino-time step in the strong-field region (<= 0 or omitted: 1/precision = 0.01)
 symp_step = 0.01

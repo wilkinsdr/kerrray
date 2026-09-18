@@ -30,3 +30,6 @@ target_link_libraries(photon_ring_test raytracer)
 
 add_executable(caustic_3d_test caustic_3d_test.cpp)
 target_link_libraries(caustic_3d_test imageplane raytracer)
+
+add_executable(caustic_ent_test caustic_ent_test.cpp)
+target_link_libraries(caustic_ent_test imageplane raytracer)

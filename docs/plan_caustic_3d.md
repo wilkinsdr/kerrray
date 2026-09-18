@@ -110,8 +110,8 @@ rg there): zoom the plane (`x0/xmax`) onto the ring rather than raising `Nx` glo
 
 ## 6  Open items
 
-- Adaptive sampling of the image plane near the critical curve (refine pixels whose neighbours differ in
-  `NCAUST`) would resolve the tube cross-sections cheaply.
+- ~~Adaptive sampling of the image plane near the critical curve~~ — done 2026-09-17 (`refine_levels`,
+  `src/caustic/adaptive_plane.h`; see `plan_caustic_ent.md` §6).
 - Fold/cusp classification (the astroid cusps) from the second derivative of the map is not attempted; the
   `DJSIGN` column and the per-pixel `NCAUST` give the parity structure.
 - A point-observer initialiser (rays converging exactly on `(r, θ)`) would remove the residual `1/dist²`

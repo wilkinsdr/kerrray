@@ -26,6 +26,14 @@
 // constant of motion h -- back to delta whenever it exceeds delta_max.  A positive rescaling does not
 // change sign(J); the accumulated log10 scale factor is stored with each caustic point as a diagnostic.
 //
+// Adaptive refinement (refine_levels > 0): after the regular grid, every cell of the plane whose four corner
+// rays differ in the number of caustic crossings or in their fate (escaped / captured / split) is split into
+// four (adaptive_plane.h), the new points are traced, and so on for refine_levels levels, so that the pixel
+// spacing near the critical curve, where the caustic tubes are produced, is dx / 2^refine_levels at a small
+// fraction of the cost of a uniform grid at that spacing.  The per-pixel images stay on the regular grid; the
+// CAUSTICS table holds the crossings of all points (IX, IY then in units of the finest spacing, LEVEL the
+// point's level) and the POINTS table lists every traced point.
+//
 // FITS output:
 //   primary header  -- run parameters
 //   CAUSTICS        -- binary table, one row per caustic crossing: IX, IY (pixel), XIMG, YIMG (image-plane
@@ -33,7 +41,9 @@
 //                      image plane), T, R, THETA, PHI (Boyer-Lindquist; PHI wrapped to (-pi, pi]), X, Y, Z
 //                      (Cartesian, kerr.h cartesian()), RFLIPS (radial turning points so far), EQCROSS
 //                      (equatorial crossings so far), DJSIGN (+1: J went - to +, -1: + to -), LOGSCALE
-//                      (accumulated log10 bundle rescaling)
+//                      (accumulated log10 bundle rescaling), LEVEL (refinement level of the point)
+//   POINTS          -- binary table (only with refine_levels > 0): XIMG, YIMG, LEVEL, NCAUST, STATUS of every
+//                      traced point (regular grid and refined)
 //   NCAUST          -- image: number of caustic crossings along the ray
 //   STATUS          -- image: 0 escaped (r >= r_max), 1 horizon, 2 step limit, 3 bundle split (an offset ray
 //                      fell through the horizon before the centre ray), 4 skipped (undefined initial ray),
@@ -65,6 +75,8 @@ using namespace std;
 
 #include "../raytracer/imageplane.h"
 #include "caustic_bundle.h"
+#include "single_ray_bundle.h"
+#include "adaptive_plane.h"
 
 #include "../include/fits_output.h"
 #include "../include/array.h"
@@ -120,6 +132,8 @@ int main(int argc, char **argv)
     double precision   = par_file.get_parameter<double>("precision", PRECISION);
     int    steplim     = par_file.get_parameter<int>("steplim", SYMP_STEPLIM);
     int    max_caustics = par_file.get_parameter<int>("max_caustics", 32);
+    int    refine_levels = par_args.key_exists("--refine_levels") ? par_args.get_parameter<int>("--refine_levels")
+                                                                  : par_file.get_parameter<int>("refine_levels", 0);
     // diagnostics: dump the centre ray and Jacobian of one bundle to a text file (dump_pixel = "ix,iy")
     string dump_pixel = par_args.key_exists("--dump_pixel")
                         ? par_args.get_parameter<string>("--dump_pixel")
@@ -240,6 +254,80 @@ int main(int argc, char **argv)
     }
     prog.done();
 
+    // --- adaptive refinement of the plane around the critical curve / caustic structure ---
+    AdaptivePlane aplane(x0, y0, dx, dy, Nx, Ny, refine_levels);
+    if (refine_levels > 0)
+    {
+        cout << "Adaptive refinement: " << refine_levels << " level(s), finest spacing "
+             << aplane.fine_dx() << " x " << aplane.fine_dy() << " rg" << endl;
+        for (int level = 0; level < refine_levels; level++)
+        {
+            // flag a cell when its corner rays differ in the number of caustic crossings or in their fate
+            vector<int> created = aplane.refine(level, [&](const PlaneCell& c)
+            {
+                const PixelResult& r0 = results[c.corner[0]];
+                for (int k = 1; k < 4; k++)
+                {
+                    const PixelResult& rk = results[c.corner[k]];
+                    if (rk.ncaust != r0.ncaust || rk.status != r0.status) return true;
+                }
+                return false;
+            });
+            results.resize(aplane.npoints());
+            cout << "  level " << level + 1 << ": " << created.size() << " new points" << endl;
+            if (created.empty()) break;
+
+            ProgressBar rprog(static_cast<long>(created.size()), "Point", 0, (show_progress > 0));
+            int done_pts = 0;
+            #pragma omp parallel
+            {
+                SingleRayBundle* srb;
+                #pragma omp critical
+                srb = new SingleRayBundle(dist, incl, plane_phi0, spin, delta, precision);
+                vector<CausticPoint> local;
+
+                #pragma omp for schedule(dynamic)
+                for (size_t m = 0; m < created.size(); m++)
+                {
+                    if (show_progress != 0)
+                    {
+                        int done;
+                        #pragma omp atomic capture
+                        done = ++done_pts;
+                        if (done % show_progress == 0)
+                        {
+                            #pragma omp critical
+                            rprog.show(done);
+                        }
+                    }
+                    const int k = created[m];
+                    const PlanePoint& pt = aplane.point(k);
+                    PixelResult& res = results[k];
+                    BundleRay b[5];
+                    if (!srb->init(pt.x, pt.y, b))
+                    {
+                        res.status = STATUS_SKIPPED; res.ncaust = 0; res.eqcross = 0; res.tau_end = 0;
+                        res.r1 = res.theta1 = res.phi1 = 0;
+                        continue;
+                    }
+                    const size_t before = local.size();
+                    trace_bundle(b, P, static_cast<int>(pt.i), static_cast<int>(pt.j), pt.x, pt.y, local, res);
+                    for (size_t q = before; q < local.size(); q++) local[q].level = pt.level;
+                }
+                #pragma omp critical
+                {
+                    caustics.insert(caustics.end(), local.begin(), local.end());
+                    delete srb;
+                }
+            }
+            rprog.done();
+        }
+        // regular-grid points: express IX, IY in units of the finest spacing too
+        const int scale = 1 << refine_levels;
+        for (auto& cp : caustics) if (cp.level == 0) { cp.ix *= scale; cp.iy *= scale; }
+        cout << "  " << aplane.npoints() << " points traced in total (" << nPix << " on the regular grid)" << endl;
+    }
+
     // --- optional diagnostic dump of a single bundle (re-traced serially) ---
     if (dump_pixel.length() > 0)
     {
@@ -271,9 +359,9 @@ int main(int argc, char **argv)
     });
 
     // --- summary ---
-    long cnt_status[6] = {0, 0, 0, 0, 0, 0};
+    long cnt_status[7] = {0, 0, 0, 0, 0, 0, 0};
     long total_caust = 0, max_n = 0;
-    for (int pix = 0; pix < nPix; pix++)
+    for (int pix = 0; pix < static_cast<int>(results.size()); pix++)
     {
         ++cnt_status[results[pix].status];
         total_caust += results[pix].ncaust;
@@ -309,17 +397,20 @@ int main(int argc, char **argv)
     fits.write_keyword("Y0",   "Start of Y axis (rg)", y0);
     fits.write_keyword("YMAX", "End of Y axis (rg)", ymax);
     fits.write_keyword("NCAUSTS", "Number of caustic points stored", static_cast<long>(caustics.size()));
+    fits.write_keyword("REFLEV",  "Adaptive refinement levels of the image plane", refine_levels);
+    fits.write_keyword("NPOINTS", "Image-plane points traced (regular grid + refined)", static_cast<long>(results.size()));
+    fits.write_keyword("IXUNIT",  "IX, IY are in units of this spacing (rg)", aplane.fine_dx());
 
     // CAUSTICS table
     {
         const long rows = static_cast<long>(caustics.size());
-        const int ncols = 17;
+        const int ncols = 18;
         const char* names[ncols]   = { "IX", "IY", "XIMG", "YIMG", "N", "TAU", "T", "R", "THETA", "PHI",
-                                       "X", "Y", "Z", "RFLIPS", "EQCROSS", "DJSIGN", "LOGSCALE" };
+                                       "X", "Y", "Z", "RFLIPS", "EQCROSS", "DJSIGN", "LOGSCALE", "LEVEL" };
         const char* formats[ncols] = { "1J", "1J", "1D", "1D", "1J", "1D", "1D", "1D", "1D", "1D",
-                                       "1D", "1D", "1D", "1J", "1J", "1J", "1D" };
+                                       "1D", "1D", "1D", "1J", "1J", "1J", "1D", "1J" };
         const char* units[ncols]   = { "", "", "rg", "rg", "", "", "rg/c", "rg", "rad", "rad",
-                                       "rg", "rg", "rg", "", "", "", "" };
+                                       "rg", "rg", "rg", "", "", "", "", "" };
         char* c_names[ncols]; char* c_formats[ncols]; char* c_units[ncols];
         for (int c = 0; c < ncols; c++)
         {
@@ -359,7 +450,38 @@ int main(int argc, char **argv)
         write_int([](const CausticPoint& p) { return p.eqcross; });
         write_int([](const CausticPoint& p) { return p.dj_sign; });
         write_dbl([](const CausticPoint& p) { return p.logscale; });
+        write_int([](const CausticPoint& p) { return p.level; });
 
+        for (int c = 0; c < ncols; c++) { free(c_names[c]); free(c_formats[c]); free(c_units[c]); }
+    }
+
+    // POINTS table: every traced point of the refined plane
+    if (refine_levels > 0)
+    {
+        const long rows = static_cast<long>(results.size());
+        const int ncols = 5;
+        const char* names[ncols]   = { "XIMG", "YIMG", "LEVEL", "NCAUST", "STATUS" };
+        const char* formats[ncols] = { "1D", "1D", "1J", "1J", "1J" };
+        const char* units[ncols]   = { "rg", "rg", "", "", "" };
+        char* c_names[ncols]; char* c_formats[ncols]; char* c_units[ncols];
+        for (int c = 0; c < ncols; c++)
+        {
+            c_names[c] = strdup(names[c]); c_formats[c] = strdup(formats[c]); c_units[c] = strdup(units[c]);
+        }
+        char extname[] = "POINTS";
+        fits.create_table(extname, ncols, rows, c_names, c_formats, c_units);
+        fits.write_comment("All image-plane points traced: regular grid (LEVEL 0) and adaptive refinement");
+        vector<double> dcol(rows); vector<int> icol(rows);
+        for (long i = 0; i < rows; i++) dcol[i] = aplane.point(static_cast<int>(i)).x;
+        fits.write_table_column(dcol.data(), rows);
+        for (long i = 0; i < rows; i++) dcol[i] = aplane.point(static_cast<int>(i)).y;
+        fits.write_table_column(dcol.data(), rows);
+        for (long i = 0; i < rows; i++) icol[i] = aplane.point(static_cast<int>(i)).level;
+        fits.write_table_column(icol.data(), rows);
+        for (long i = 0; i < rows; i++) icol[i] = results[i].ncaust;
+        fits.write_table_column(icol.data(), rows);
+        for (long i = 0; i < rows; i++) icol[i] = results[i].status;
+        fits.write_table_column(icol.data(), rows);
         for (int c = 0; c < ncols; c++) { free(c_names[c]); free(c_formats[c]); free(c_units[c]); }
     }
 

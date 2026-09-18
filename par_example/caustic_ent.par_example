@@ -1,0 +1,120 @@
+# caustic_ent.par
+#
+# Parameters for caustic_ent: the intersection of the observer's caustic surface with the accretion disc
+# plane, placed in the energy/time plane of the reverberation response function (the "ent plot" of
+# disc_ent_line_rbin).  For every image-plane pixel a lockstep bundle of rays is traced to its equatorial
+# crossings and the ray-family Jacobian J is evaluated there; the caustic / disc curves are the zero contours
+# of J (one sheet per crossing order), refined along the pixel edges by bisection.  At each point the energy is
+# line_en / g (g = E_disc / E_obs for Keplerian disc emission) and the time is the source-to-disc plus the
+# disc-to-observer light travel time minus the continuum arrival time, as in the ent code.
+#
+# Copy this file to par/caustic_ent.par and edit as needed.
+# Run from the project root:
+#   ./bin/caustic_ent --parfile=par/caustic_ent.par --outfile=dat/caustic_ent.fits
+#   ./bin/caustic_ent --parfile=par/caustic_ent.par --outfile=dat/caustic_ent.fits --entfile=dat/disc_ent.fits
+# Plot (over-plotted on the ent response when an ent file is given):
+#   python python/caustic_ent.py dat/caustic_ent.fits [dat/disc_ent.fits]
+#
+
+# Output FITS file (path relative to bin/ or use absolute path)
+outfile = ../dat/caustic_ent.fits
+
+# Optional: disc_ent_line_rbin output whose DISC table supplies the source-to-disc times (and whose header
+# supplies line_en, t_continuum, the time units and the disc radii), so that the curves sit on exactly the
+# time axis of that response.  Leave empty to trace the source here with the parameters below.
+#entfile = ../dat/disc_ent.fits
+# (the file name is recorded in the output header, so caustic_ent.py finds the response to plot on by itself)
+# (the file is also recorded in the output header, so caustic_ent.py finds the response to plot on by itself)
+
+# ---------------------------------------------------------------------------------------------------------
+# Observer and image plane (as caustic_3d)
+# ---------------------------------------------------------------------------------------------------------
+# Observer distance (gravitational radii; >= 500 for the parallel-ray image plane)
+dist = 1000
+# Observer inclination (degrees from spin axis)
+incl = 60
+# Azimuth of the image plane centre (radians)
+plane_phi0 = 0
+# Black hole spin parameter a/M
+spin = 0.998
+
+# Image plane extent (rg) and resolution (grid steps; the plane has (Nx+1)*(Ny+1) rays).  The caustic / disc
+# curves are produced by rays near the critical curve (|b| ~ 3-7 rg); +-10 rg covers them.  The contour is
+# refined along the pixel edges, so 200x200 already gives smooth curves; raise Nx for the fine structure.
+x0   = -10
+xmax =  10
+y0   = -10
+ymax =  10
+Nx = 200
+Ny = 200
+
+# Bundle offset in the image plane (rg): the finite-difference step for the Jacobian
+delta = 1e-4
+# Rescale the bundle when an offset ray drifts further than this from the centre (default 100 * delta)
+#delta_max = 1e-2
+# Escape radius (rg; default 1.1 * dist)
+#r_max = 1100
+
+# Number of equatorial crossings recorded per ray = number of caustic / disc sheets traced (1: direct image
+# only; 2 adds the rays that pass under the disc plane once, ...)
+max_eqcross = 3
+
+# Bisection iterations per contour vertex along the pixel edge (0: linear interpolation only).  10 resolves
+# the vertex to dx / 1024 and costs ~11 bundle traces per vertex.
+refine_iter = 10
+
+# Adaptive refinement of the image plane: cells with a sign change of J along one of their edges (on any
+# sheet) are split in four and the new points traced, this many times (0 = off), so the curves are sampled at
+# a spacing of dx / 2^refine_levels where they run (121x121 with 3 levels: ~340 vertices for +25 % cost, the
+# same as a 961x961 plane).  Contour pieces narrower than a regular-grid pixel are only found if a refined
+# point happens to land on them; refine_status = 1 also splits cells whose corner rays differ in their number
+# of equatorial crossings or fate (along the critical curve), which finds them at ~3x the cost.
+refine_levels = 3
+refine_status = 0
+
+# Reject contour edges across which the crossing position on the disc jumps by more than this (rg): J is
+# discontinuous rather than zero where the number of equatorial crossings of neighbouring rays changes.
+max_jump = 2.0
+
+# Symplectic (Mino-time) integrator settings for the bundles (and, when integrator = symplectic, the source rays)
+symp_step = 0.01
+symp_order = 6
+max_tstep = 1
+#maxtstep_rlim = 100
+#max_phistep = 0.1
+#steplim = 1000000
+
+# ---------------------------------------------------------------------------------------------------------
+# Point source and disc (as disc_ent_line_rbin; ignored when entfile is set, except integrator settings)
+# ---------------------------------------------------------------------------------------------------------
+# Source position (t, r, theta, phi) and angular velocity dphi/dt
+source = 0 5 1E-3 0
+V = 0
+# Ray grid from the source (cos of the polar angle and the azimuth)
+cosalpha0 = -0.9999
+cosalphamax = 0.9999
+dcosalpha = 0.002
+beta0 = -3.14159265
+betamax = 3.14159265
+dbeta = 0.02
+# Source rays are traced until they reach the disc plane or this radius
+rmax = 1000
+# Disc radii (rmin < 0: ISCO) and annulus binning of the arrival times
+rmin = -1
+rdisc = 500
+Nr = 100
+logbin_r = 1
+# Interpolate the source-to-disc time between annuli (1) or use the per-annulus mean as a step function (0)
+time_interp = 1
+# Integrator for the source rays: euler, rk4, rk45 or symplectic
+integrator = symplectic
+rk45_tol = 1e-8
+
+# Rest-frame line energy, continuum (direct source-to-observer) arrival time to subtract, and black hole mass
+# in solar masses (< 0: times in GM/c^3)
+line_en = 6.4
+t_continuum = 0
+mass = -1
+
+# Show progress bar (1 = yes, 0 = no)
+show_progress = 1

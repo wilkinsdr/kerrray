@@ -38,7 +38,23 @@ using namespace std;
 
 // pixel termination status codes (STATUS extension)
 enum BundleStatus { STATUS_ESCAPED = 0, STATUS_HORIZON = 1, STATUS_STEPLIM = 2, STATUS_SPLIT = 3,
-                    STATUS_SKIPPED = 4, STATUS_NAN = 5 };
+                    STATUS_SKIPPED = 4, STATUS_NAN = 5, STATUS_EQSTOP = 6 };
+
+// The state of the bundle when the centre ray crosses the equatorial plane (theta = pi/2), recorded by
+// trace_bundle when BundleParams::max_eqcross > 0 (used by caustic_ent to locate the caustic / disc-plane
+// intersection: the caustic meets the disc where J, evaluated at the crossing, vanishes).
+//   J        finite-difference Jacobian of the (rescaled) bundle at the crossing; J * 10^logscale is the
+//            Jacobian of the unscaled family, continuous from pixel to pixel
+//   ncaust   caustic crossings along the ray before this equatorial crossing
+struct DiscCrossing
+{
+    int n;                     // equatorial crossing index (1-based)
+    double J, logscale;
+    double tau, t, r, phi;     // centre ray at the crossing (phi wrapped to (-pi, pi])
+    double u, pu, ptheta;      // canonical Mino-time state of the centre ray (theta = pi/2)
+    double k, h;               // constants of motion of the centre ray
+    int ncaust, rflips;
+};
 
 struct CausticPoint
 {
@@ -48,6 +64,7 @@ struct CausticPoint
     double X, Y, Z;
     int rflips, eqcross, dj_sign;
     double logscale;
+    int level = 0;             // refinement level of the image-plane point (adaptive_plane.h); 0 = regular grid
 };
 
 struct PixelResult
@@ -78,6 +95,8 @@ struct BundleParams
     double delta_max;      // rescale the bundle when an offset ray is further than this from the centre
     int order;             // composition order of the symplectic stepper
     int steplim;
+    int max_eqcross = 0;   // record the bundle state at the first max_eqcross equatorial crossings (0: none)
+    int stop_after_eqcross = 0;  // stop the bundle after this many equatorial crossings (0: never)
     int max_caustics;      // maximum number of caustic points stored per ray
 };
 
@@ -185,7 +204,8 @@ static inline void rescale_pair(BundleRay b[5], int i, int j, double s)
 // recording every caustic crossing in out.
 //
 static void trace_bundle(BundleRay b[5], const BundleParams& P, int ix, int iy, double ximg, double yimg,
-                         vector<CausticPoint>& out, PixelResult& res, ostream* dump = nullptr)
+                         vector<CausticPoint>& out, PixelResult& res, ostream* dump = nullptr,
+                         vector<DiscCrossing>* disc = nullptr)
 {
     MinoStepper<double> st[5] = { MinoStepper<double>(P.a, b[0].k, b[0].h, P.order),
                                   MinoStepper<double>(P.a, b[1].k, b[1].h, P.order),
@@ -262,6 +282,7 @@ static void trace_bundle(BundleRay b[5], const BundleParams& P, int ix, int iy, 
 
         // --- caustic crossing: sign change of J across the step ---
         double J = bundle_jacobian(b, P.a, P.delta);
+        double caustic_frac = 2*step;   // fraction of the step at which a caustic was crossed (> step: none)
         if (isfinite(J) && isfinite(J_prev) && J_prev * J < 0)
         {
             // bisection on the fraction of the step; the crossing lies in (lo, hi]
@@ -275,6 +296,7 @@ static void trace_bundle(BundleRay b[5], const BundleParams& P, int ix, int iy, 
                 if (hr >= 0 || !isfinite(Jm) || Jm * J_prev < 0) hi = mid; else lo = mid;
             }
             const double frac = (lo + hi) / 2;
+            caustic_frac = frac;
             for (int i = 0; i < 5; i++) trial[i] = prev[i];
             bundle_step(trial, st, frac);
 
@@ -306,9 +328,52 @@ static void trace_bundle(BundleRay b[5], const BundleParams& P, int ix, int iy, 
         J_prev = J;
         dump_state(steps, J);
 
+        // --- equatorial crossing of the centre ray: land the bundle exactly on theta = pi/2 and record it ---
+        const bool eq_now = crossed_equator(prev[0].s.theta, b[0].s.theta);
+        if (eq_now && disc != nullptr && eqcross < P.max_eqcross)
+        {
+            // bisection on the fraction of the step for theta - pi/2 = 0 (the crossing lies in (lo, hi])
+            const double side_prev = prev[0].s.theta - M_PI_2;
+            double lo = 0, hi = step;
+            for (int it = 0; it < 60 && (hi - lo) > 1e-13*step; it++)
+            {
+                const double mid = (lo + hi) / 2;
+                for (int i = 0; i < 5; i++) trial[i] = prev[i];
+                const int hr = bundle_step(trial, st, mid);
+                const double side = trial[0].s.theta - M_PI_2;
+                if (hr >= 0 || !isfinite(side) || side * side_prev <= 0) hi = mid; else lo = mid;
+            }
+            const double frac = (lo + hi) / 2;
+            for (int i = 0; i < 5; i++) trial[i] = prev[i];
+            bundle_step(trial, st, frac);
+
+            DiscCrossing dc;
+            dc.n = eqcross + 1;
+            dc.J = bundle_jacobian(trial, P.a, P.delta);
+            dc.logscale = logscale;
+            dc.tau = tau - step + frac;
+            dc.t = trial[0].s.t;
+            double sdc;
+            mino_r_from_u<double>(trial[0].s.u, P.a, dc.r, sdc);
+            dc.phi = wrap_phi(trial[0].s.phi);
+            dc.u = trial[0].s.u; dc.pu = trial[0].s.pu; dc.ptheta = trial[0].s.ptheta;
+            dc.k = trial[0].k; dc.h = trial[0].h;
+            // caustics crossed before this point along the ray: those of previous steps plus one if the
+            // caustic crossing in this step came earlier than the equatorial crossing
+            dc.ncaust = res.ncaust - ((caustic_frac <= step && caustic_frac > frac) ? 1 : 0);
+            dc.rflips = rflips + ((prev[0].s.pu * trial[0].s.pu < 0) ? 1 : 0);
+            disc->push_back(dc);
+        }
+
         // --- bookkeeping on the centre ray ---
         if (prev[0].s.pu * b[0].s.pu < 0) ++rflips;
-        if (crossed_equator(prev[0].s.theta, b[0].s.theta)) ++eqcross;
+        if (eq_now) ++eqcross;
+
+        if (P.stop_after_eqcross > 0 && eqcross >= P.stop_after_eqcross)
+        {
+            res.status = STATUS_EQSTOP;
+            break;
+        }
 
         if (r >= P.r_max)
         {
@@ -369,6 +434,21 @@ static inline bool bundle_from_rays(const RayArray* const rays[5], int pix, doub
                           b[i].s.u, b[i].s.pu, b[i].s.ptheta);
     }
     return ok;
+}
+
+// Redshift of a photon emitted from the disc (circular Keplerian orbit, V = -1) at an equatorial crossing of
+// the centre ray, evaluated with Raytracer::ray_redshift in reverse mode exactly as for ImagePlane rays.
+// rt is the raytracer the bundle was started from (its spin is the propagation spin, -a_phys); emit is the
+// energy at the observer stored by rt.redshift_start() for the pixel.  The momentum signs are those of the
+// backward-traced ray at the crossing (dr/dlambda ~ p_u since r increases with u; dtheta/dlambda ~ p_theta).
+// Returns E_disc / E_observer (the same convention as Ray::redshift).
+template <typename RT>
+static inline double disc_crossing_redshift(RT& rt, const DiscCrossing& dc, double a_prop, double emit)
+{
+    const double Q = carter_Q<double>(M_PI_2, dc.ptheta, dc.k, dc.h, a_prop);
+    const int rdot_sign = (dc.pu >= 0) ? 1 : -1;
+    const int thetadot_sign = (dc.ptheta >= 0) ? 1 : -1;
+    return rt.ray_redshift(-1.0, true, false, dc.r, M_PI_2, dc.phi, dc.k, dc.h, Q, rdot_sign, thetadot_sign, emit);
 }
 
 #endif /* CAUSTIC_BUNDLE_H_ */
