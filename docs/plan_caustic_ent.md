@@ -113,8 +113,8 @@ line_en (6.4), t_continuum, mass (-1), time_interp (1)`), or `entfile`. Command-
   positive; saddles by the cell-centre average) and linking into ordered open/closed polylines.
 - `src/caustic/caustic_ent.cpp` — application: source-time table (internal `PointSource` run with the ent
   code's annulus binning, or `entfile` read with cfitsio), image-plane bundles (OpenMP), contours per sheet,
-  per-vertex refinement (OpenMP; per-thread `SingleRayBundle` = five single-ray `ImagePlane`s re-initialised
-  with `init_image_plane` at each trial position, `emit` interpolated between the pixels), FITS output.
+  per-vertex refinement (OpenMP; each trial position is a fresh `CausticBundle` built from the plane with
+  `ImagePlane::init_ray`, since the 2026-09-18 class refactor — see `plan_caustic_bundle_class.md`), FITS output.
 - `src/tests/caustic_ent_test.cpp`, `par_example/caustic_ent.par_example`, `python/caustic_ent.py`.
 - `src/caustic/CMakeLists.txt` had committed merge-conflict markers, and `src/raytracer/raytracer.cpp` did not
   compile after the merge (the per-run `steplim` parameter of `run_raytrace` shadowed the local default; now

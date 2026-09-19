@@ -371,59 +371,67 @@ void Raytracer<T>::redshift_start(T V, bool reverse, bool projradius )
 	cout << "Calculating initial energies" << endl;
 
 	for(int ray=0; ray<nRays; ray++)
-	{
-		T p[4];
+		rays[ray].emit = emit_energy(rays[ray], V, reverse, projradius);
+}
 
-		const T a = (reverse) ? -1*spin : spin;
+template <typename T>
+inline T Raytracer<T>::emit_energy(const Ray<T>& ray, T V, bool reverse, bool projradius) const
+{
+	//
+	// Energy of a ray in the frame of an emitter/observer at the ray's current position orbiting the black
+	// hole rotation axis at angular velocity V (V = -1: circular orbit at the ray's r); reverse: the ray is
+	// being propagated backwards in time (image planes), so the spin is flipped back and the spatial momentum
+	// reversed.  This is what redshift_start() stores in Ray::emit.
+	//
+	T p[4];
 
-		// metric coefficients
-		const T rhosq = rays[ray].r*rays[ray].r + (a*cos(rays[ray].theta))*(a*cos(rays[ray].theta));
-		const T delta = rays[ray].r*rays[ray].r - 2*rays[ray].r + a*a;
-		const T sigmasq = (rays[ray].r*rays[ray].r + a*a)*(rays[ray].r*rays[ray].r + a*a) - a*a*delta*sin(rays[ray].theta)*sin(rays[ray].theta);
+	const T a = (reverse) ? -1*spin : spin;
 
-		const T e2nu = rhosq * delta / sigmasq;
-		const T e2psi = sigmasq * sin(rays[ray].theta)*sin(rays[ray].theta) / rhosq;
-		const T omega = 2*a*rays[ray].r / sigmasq;
+	// metric coefficients
+	const T rhosq = ray.r*ray.r + (a*cos(ray.theta))*(a*cos(ray.theta));
+	const T delta = ray.r*ray.r - 2*ray.r + a*a;
+	const T sigmasq = (ray.r*ray.r + a*a)*(ray.r*ray.r + a*a) - a*a*delta*sin(ray.theta)*sin(ray.theta);
 
-		T g[16];
-		for(int i=0; i<16; i++)
-			g[i] = 0;
+	const T e2nu = rhosq * delta / sigmasq;
+	const T e2psi = sigmasq * sin(ray.theta)*sin(ray.theta) / rhosq;
+	const T omega = 2*a*ray.r / sigmasq;
 
-		// g[i][j] -> g[i*4 + j]
-		g[0*4 + 0] = e2nu - omega*omega*e2psi;
-		g[0*4 + 3] = omega*e2psi;
-		g[3*4 + 0] = g[0*4 + 3];
-		g[1*4 + 1] = -rhosq/delta;
-		g[2*4 + 2] = -rhosq;
-		g[3*4 + 3] = -e2psi;
+	T g[16];
+	for(int i=0; i<16; i++)
+		g[i] = 0;
 
-		// if V==-1, calculate orbital velocity for a geodesic circular orbit in equatorial plane
-		if(V == -1 && projradius)
-			V = 1 / (a + rays[ray].r*sin(rays[ray].theta)*sqrt(rays[ray].r*sin(rays[ray].theta)));	// project the radius parallel to the equatorial plane
-		else if(V == -1)
-			V = 1 / (a + rays[ray].r*sqrt(rays[ray].r));
+	// g[i][j] -> g[i*4 + j]
+	g[0*4 + 0] = e2nu - omega*omega*e2psi;
+	g[0*4 + 3] = omega*e2psi;
+	g[3*4 + 0] = g[0*4 + 3];
+	g[1*4 + 1] = -rhosq/delta;
+	g[2*4 + 2] = -rhosq;
+	g[3*4 + 3] = -e2psi;
 
-		// if(reverse) V *= -1;
+	// if V==-1, calculate orbital velocity for a geodesic circular orbit in equatorial plane
+	if(V == -1 && projradius)
+		V = 1 / (a + ray.r*sin(ray.theta)*sqrt(ray.r*sin(ray.theta)));	// project the radius parallel to the equatorial plane
+	else if(V == -1)
+		V = 1 / (a + ray.r*sqrt(ray.r));
 
+	// timelike basis vector
+	const T et[] = { (1/sqrt(e2nu))/sqrt(1 - (V - omega)*(V - omega)*e2psi/e2nu)
+						, 0 , 0 ,
+						(1/sqrt(e2nu))*V / sqrt(1 - (V - omega)*(V - omega)*e2psi/e2nu) };
 
-		// timelike basis vector
-		const T et[] = { (1/sqrt(e2nu))/sqrt(1 - (V - omega)*(V - omega)*e2psi/e2nu)
-							, 0 , 0 ,
-							(1/sqrt(e2nu))*V / sqrt(1 - (V - omega)*(V - omega)*e2psi/e2nu) };
+	// photon momentum
+	momentum_from_consts<T>(p[0], p[1], p[2], p[3], ray.k, ray.h, ray.Q, ray.rdot_sign,
+	                        ray.thetadot_sign, ray.r, ray.theta, ray.phi, spin);
 
-		// photon momentum
-        momentum_from_consts<T>(p[0], p[1], p[2], p[3], rays[ray].k, rays[ray].h, rays[ray].Q, rays[ray].rdot_sign,
-                                rays[ray].thetadot_sign, rays[ray].r, rays[ray].theta, rays[ray].phi, spin);
+	// if we're propagating backwards, reverse the direction of the photon momentum
+	if(reverse) { p[1] *= -1; p[2] *= -1; p[3] *= -1; }
 
-		// if we're propagating backwards, reverse the direction of the photon momentum
-		if(reverse) { p[1] *= -1; p[2] *= -1; p[3] *= -1; }
-
-		// evaluate dot product to get energy
-		rays[ray].emit = 0;
-		for(int i=0; i<4; i++)
-			for(int j=0; j<4; j++)
-				rays[ray].emit += g[i*4 + j] * et[i]* p[j];
-	}
+	// evaluate dot product to get energy
+	T emit = 0;
+	for(int i=0; i<4; i++)
+		for(int j=0; j<4; j++)
+			emit += g[i*4 + j] * et[i]* p[j];
+	return emit;
 }
 
 
@@ -488,7 +496,7 @@ void Raytracer<T>::redshift(RayDestination<T>* dest, bool reverse, bool projradi
 
 
 template <typename T>
-inline T Raytracer<T>::ray_redshift( T V, bool reverse, bool projradius, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit, int motion )
+inline T Raytracer<T>::ray_redshift( T V, bool reverse, bool projradius, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit, int motion ) const
 {
 	// calculate the redshift of a single ray
 
@@ -564,7 +572,7 @@ inline T Raytracer<T>::ray_redshift( T V, bool reverse, bool projradius, T r, T 
 
 
 template <typename T>
-inline T Raytracer<T>::ray_redshift( const T et[4], bool reverse, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit )
+inline T Raytracer<T>::ray_redshift( const T et[4], bool reverse, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit ) const
 {
 	// calculate the redshift of a single ray given the observer 4-velocity et[4]
 
@@ -688,12 +696,18 @@ inline void Raytracer<T>::calculate_constants(int ray, T alpha, T beta, T V, T E
 template <typename T>
 inline void Raytracer<T>::calculate_constants_from_p(int ray, T pt, T pr, T ptheta, T pphi)
 {
+	calculate_constants_from_p(rays[ray], pt, pr, ptheta, pphi);
+}
+
+template <typename T>
+inline void Raytracer<T>::calculate_constants_from_p(Ray<T>& ray, T pt, T pr, T ptheta, T pphi) const
+{
 	//
 	// calculate constants of motion from the 4-momentum and location of a photon
 	//
 	const T a = spin;
-	const T r = rays[ray].r;
-	const T theta = rays[ray].theta;
+	const T r = ray.r;
+	const T theta = ray.theta;
 
 	const T rhosq = r*r + (a*cos(theta))*(a*cos(theta));
 
@@ -705,9 +719,9 @@ inline void Raytracer<T>::calculate_constants_from_p(int ray, T pt, T pr, T pthe
 
 	T Q = rhosq*rhosq*ptheta*ptheta - (a*k*cos(theta) + h/tan(theta))*(a*k*cos(theta) - h/tan(theta));
 	
-	rays[ray].k = k;
-	rays[ray].h = h;
-	rays[ray].Q = Q;
+	ray.k = k;
+	ray.h = h;
+	ray.Q = Q;
 }
 
 

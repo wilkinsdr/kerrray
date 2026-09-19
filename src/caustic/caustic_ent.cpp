@@ -80,7 +80,6 @@ using namespace std;
 #include "../raytracer/pointsource.h"
 #include "caustic_bundle.h"
 #include "disc_caustic_contour.h"
-#include "single_ray_bundle.h"
 #include "adaptive_plane.h"
 
 #include "../include/fits_output.h"
@@ -369,50 +368,41 @@ int main(int argc, char **argv)
     cout << "Image plane: " << img_Nx << " x " << img_Ny << " = " << nPix << " bundles of 5 rays; "
          << max_eqcross << " equatorial crossings per ray" << endl;
 
-    const double offx[5] = { 0, delta, -delta, 0, 0 }, offy[5] = { 0, 0, 0, delta, -delta };
-    ImagePlane<double>* planes[5];
-    for (int i = 0; i < 5; i++)
+    // the image plane: one plane; each CausticBundle builds its centre and offset rays from it
+    ImagePlane<double> plane(dist, incl, x0, xmax, dx_ip, y0, ymax, dy_ip, spin, plane_phi0, precision);
+    if (plane.get_count() != nPix)
     {
-        planes[i] = new ImagePlane<double>(dist, incl, x0 + offx[i], xmax + offx[i], dx_ip,
-                                           y0 + offy[i], ymax + offy[i], dy_ip, spin, plane_phi0, precision);
-        if (planes[i]->get_count() != nPix)
-        {
-            cerr << "Error: image plane " << i << " has " << planes[i]->get_count() << " rays, expected " << nPix << endl;
-            return 1;
-        }
+        cerr << "Error: image plane has " << plane.get_count() << " rays, expected " << nPix << endl;
+        return 1;
     }
-    planes[0]->redshift_start();
 
-    BundleParams P;
-    P.a = -spin;
-    P.horizon = r_horizon;
-    P.h0 = (symp_step > 0) ? symp_step : 1.0 / precision;
-    P.r_cap = 2 * r_horizon;
+    CausticBundle<double>::Params P = CausticBundle<double>::Params::from_plane(plane, spin, delta, symp_step, precision);
     P.max_tstep = max_tstep; P.maxtstep_rlim = maxtstep_rlim; P.max_phistep = max_phistep;
     P.r_max = r_max;
-    P.delta = delta; P.delta_max = delta_max;
+    P.delta_max = delta_max;
     P.order = symp_order;
     P.steplim = steplim;
     P.max_caustics = 0;
     P.max_eqcross = max_eqcross;
     P.stop_after_eqcross = max_eqcross;
 
-    const Ray<double>* ray_arrays[5];
-    for (int i = 0; i < 5; i++) ray_arrays[i] = planes[i]->rays;
-
-    // --- per-pixel bundles ---
     vector<PixelResult> results(nPix);
     vector<vector<SheetPixel>> sheets(max_eqcross, vector<SheetPixel>(nPix));
 
-    // evaluate the redshift and Cartesian disc position of a crossing
-    auto fill_sheet_pixel = [&](SheetPixel& sp, const DiscCrossing& dc, double emit)
+    // record the crossings of a traced bundle on the sheets (redshift and Cartesian disc position included)
+    auto fill_sheets = [&](const CausticBundle<double>& b, int k)
     {
-        sp.valid = true;
-        sp.dc = dc;
-        sp.J = dc.J * pow(10.0, dc.logscale);
-        sp.g = (dc.r >= r_isco) ? disc_crossing_redshift(*planes[0], dc, P.a, emit) : NaN;
-        double Z;
-        cartesian<double>(sp.X, sp.Y, Z, dc.r, M_PI_2, dc.phi, spin);
+        for (const DiscCrossing& dc : b.disc_crossings())
+        {
+            if (dc.n < 1 || dc.n > max_eqcross) continue;
+            SheetPixel& sp = sheets[dc.n - 1][k];
+            sp.valid = true;
+            sp.dc = dc;
+            sp.J = dc.J * pow(10.0, dc.logscale);
+            sp.g = (dc.r >= r_isco) ? b.disc_redshift(dc) : NaN;
+            double Z;
+            cartesian<double>(sp.X, sp.Y, Z, dc.r, M_PI_2, dc.phi, spin);
+        }
     };
 
     cout << "Tracing image-plane bundles to their equatorial crossings..." << endl;
@@ -432,24 +422,13 @@ int main(int argc, char **argv)
                 prog.show(done);
             }
         }
-        BundleRay b[5];
-        PixelResult& res = results[pix];
-        if (!bundle_from_rays(ray_arrays, pix, P.a, b))
-        {
-            res.status = STATUS_SKIPPED; res.ncaust = 0; res.eqcross = 0; res.tau_end = 0;
-            continue;
-        }
-        vector<CausticPoint> dummy; vector<DiscCrossing> dc;
-        trace_bundle(b, P, planes[0]->get_x_index(pix), planes[0]->get_y_index(pix),
-                     planes[0]->rays[pix].alpha, planes[0]->rays[pix].beta, dummy, res, nullptr, &dc);
-        for (auto& d : dc)
-            if (d.n >= 1 && d.n <= max_eqcross) fill_sheet_pixel(sheets[d.n - 1][pix], d, planes[0]->rays[pix].emit);
+        CausticBundle<double> b(plane, P, plane.rays[pix].alpha, plane.rays[pix].beta,
+                                plane.get_x_index(pix), plane.get_y_index(pix));
+        if (b.valid()) b.trace();       // invalid: the x = y = 0 ray, undefined in ImagePlane
+        results[pix] = b.result();
+        fill_sheets(b, pix);
     }
     prog.done();
-
-    // observer-frame energy of the centre ray of every point (regular grid: from redshift_start())
-    vector<double> emits(nPix);
-    for (int pix = 0; pix < nPix; pix++) emits[pix] = planes[0]->rays[pix].emit;
 
     // --- adaptive refinement of the plane around the sign changes of J_n ---
     AdaptivePlane aplane(x0, y0, dx, dy, Nx, Ny, refine_levels);
@@ -475,7 +454,6 @@ int main(int argc, char **argv)
                 return false;
             });
             results.resize(aplane.npoints());
-            emits.resize(aplane.npoints());
             for (int n = 0; n < max_eqcross; n++) sheets[n].resize(aplane.npoints());
             cout << "  level " << level + 1 << ": " << created.size() << " new points" << endl;
             if (created.empty()) break;
@@ -484,10 +462,6 @@ int main(int argc, char **argv)
             int done_pts = 0;
             #pragma omp parallel
             {
-                SingleRayBundle* srb;
-                #pragma omp critical
-                srb = new SingleRayBundle(dist, incl, plane_phi0, spin, delta, precision);
-
                 #pragma omp for schedule(dynamic)
                 for (size_t m = 0; m < created.size(); m++)
                 {
@@ -504,20 +478,11 @@ int main(int argc, char **argv)
                     }
                     const int k = created[m];
                     const PlanePoint& pt = aplane.point(k);
-                    PixelResult& res = results[k];
-                    BundleRay b[5];
-                    if (!srb->init(pt.x, pt.y, b, &emits[k]))
-                    {
-                        res.status = STATUS_SKIPPED; res.ncaust = 0; res.eqcross = 0; res.tau_end = 0;
-                        continue;
-                    }
-                    vector<CausticPoint> dummy; vector<DiscCrossing> dc;
-                    trace_bundle(b, P, static_cast<int>(pt.i), static_cast<int>(pt.j), pt.x, pt.y, dummy, res, nullptr, &dc);
-                    for (auto& d : dc)
-                        if (d.n >= 1 && d.n <= max_eqcross) fill_sheet_pixel(sheets[d.n - 1][k], d, emits[k]);
+                    CausticBundle<double> b(plane, P, pt.x, pt.y, static_cast<int>(pt.i), static_cast<int>(pt.j), pt.level);
+                    if (b.valid()) b.trace();
+                    results[k] = b.result();
+                    fill_sheets(b, k);
                 }
-                #pragma omp critical
-                delete srb;
             }
             rprog.done();
         }
@@ -548,28 +513,27 @@ int main(int argc, char **argv)
             for (size_t v = 0; v < curves[c].vertices.size(); v++) vrefs.push_back({static_cast<int>(c), static_cast<int>(v)});
         vector<CurveRow> sheet_rows(vrefs.size());
 
-        BundleParams Pn = P;
+        CausticBundle<double>::Params Pn = P;
         Pn.max_eqcross = n; Pn.stop_after_eqcross = n;
 
         ProgressBar rprog(static_cast<long>(vrefs.size()), "Vertex", 0, (show_progress > 0 && refine_iter > 0));
         int v_done = 0, unrefined = 0, rejected = 0;
         #pragma omp parallel
         {
-            SingleRayBundle* srb = nullptr;
-            if (refine_iter > 0)
+            // trace a bundle from (x, y) to its n-th equatorial crossing; returns false if it has none.
+            // g receives the disc redshift there (NaN inside the ISCO)
+            auto eval = [&](double x, double y, DiscCrossing& out, double& g) -> bool
             {
-                #pragma omp critical
-                srb = new SingleRayBundle(dist, incl, plane_phi0, spin, delta, precision);
-            }
-
-            // trace a bundle from (x, y) to its n-th equatorial crossing; returns false if it has none
-            auto eval = [&](double x, double y, DiscCrossing& out) -> bool
-            {
-                BundleRay b[5];
-                if (!srb->init(x, y, b)) return false;
-                vector<CausticPoint> dummy; vector<DiscCrossing> dc; PixelResult r;
-                trace_bundle(b, Pn, 0, 0, x, y, dummy, r, nullptr, &dc);
-                for (auto& d : dc) if (d.n == n && isfinite(d.J)) { out = d; return true; }
+                CausticBundle<double> b(plane, Pn, x, y);
+                if (!b.valid()) return false;
+                b.trace();
+                for (const DiscCrossing& d : b.disc_crossings())
+                    if (d.n == n && isfinite(d.J))
+                    {
+                        out = d;
+                        g = (d.r >= r_isco) ? b.disc_redshift(d) : NaN;
+                        return true;
+                    }
                 return false;
             };
 
@@ -601,23 +565,24 @@ int main(int argc, char **argv)
                 // bisection along the edge on the sign of J_n, keeping the crossings at both ends of the bracket
                 double lo = 0, hi = 1;
                 DiscCrossing d_lo = p0.dc, d_hi = p1.dc, best;
-                double Jlo = p0.J;
+                double Jlo = p0.J, best_g = NaN, g_trial;
                 bool have_best = false; bool converged = (refine_iter > 0);
                 for (int it = 0; it < refine_iter; it++)
                 {
                     const double s = 0.5 * (lo + hi);
                     DiscCrossing d;
-                    if (!eval(xa + s * (xb - xa), ya + s * (yb - ya), d)) { converged = false; break; }
+                    if (!eval(xa + s * (xb - xa), ya + s * (yb - ya), d, g_trial)) { converged = false; break; }
                     const double J = d.J * pow(10.0, d.logscale);
                     if ((J >= 0) == (Jlo >= 0)) { lo = s; Jlo = J; d_lo = d; } else { hi = s; d_hi = d; }
-                    best = d; have_best = true;
+                    best = d; best_g = g_trial; have_best = true;
                 }
                 double s_final = 0.5 * (lo + hi);
                 if (have_best && converged)
                 {
                     // final evaluation at the bracket mid-point
                     DiscCrossing d;
-                    if (eval(xa + s_final * (xb - xa), ya + s_final * (yb - ya), d)) best = d; else converged = false;
+                    if (eval(xa + s_final * (xb - xa), ya + s_final * (yb - ya), d, g_trial)) { best = d; best_g = g_trial; }
+                    else converged = false;
                 }
                 row.refined = (have_best && converged) ? 1 : 0;
                 // residual jump of the crossing position across the bracket: small for a genuine zero of a
@@ -638,14 +603,13 @@ int main(int argc, char **argv)
 
                 if (row.refined)
                 {
-                    const double emit = emits[v.p0] + s_final * (emits[v.p1] - emits[v.p0]);
                     row.ximg = xa + s_final * (xb - xa); row.yimg = ya + s_final * (yb - ya);
                     row.r = best.r; row.phi = best.phi; row.tdo = best.t;
                     // order of the caustic meeting the disc here: the rays on one side of the bracket cross it
                     // before reaching the disc, those on the other side after
                     row.ncaust = min(d_lo.ncaust, d_hi.ncaust) + 1;
                     double Z; cartesian<double>(row.X, row.Y, Z, best.r, M_PI_2, best.phi, spin);
-                    row.g = (best.r >= r_isco) ? disc_crossing_redshift(*planes[0], best, P.a, emit) : NaN;
+                    row.g = best_g;
                 }
                 else
                 {
@@ -666,8 +630,6 @@ int main(int argc, char **argv)
                 row.time = (row.tsd + row.tdo - t_continuum) * rgs;
                 sheet_rows[k] = row;
             }
-            #pragma omp critical
-            delete srb;     // (the destructor also redirects cout, so one thread at a time)
         }
         rprog.done();
         total_unrefined += unrefined;
@@ -871,7 +833,6 @@ int main(int argc, char **argv)
     }
 
     fits.close();
-    for (int i = 0; i < 5; i++) delete planes[i];
 
     cout << "Done. Output: " << out_filename << endl;
     return 0;

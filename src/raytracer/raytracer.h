@@ -117,6 +117,7 @@ protected:	// these members need to be accessible by derived classes to set up d
 
 	inline void calculate_constants(int ray, T alpha, T beta, T V, T E);
 	inline void calculate_constants_from_p(int ray, T pt, T pr, T ptheta, T pphi);
+	inline void calculate_constants_from_p(Ray<T>& ray, T pt, T pr, T ptheta, T pphi) const;
 
     // shared implementation of the two propagate_symplectic() overloads (dest == nullptr: use thetalim)
     inline int propagate_symplectic_impl(int ray, const T rlim, const T thetalim, RayDestination<T>* dest, const int steplim,
@@ -155,10 +156,13 @@ public:
                                , int write_step = 1, T write_rmax = -1, T write_rmin = -1, bool write_cartesian = true);
 
     void redshift_start(T V, bool reverse = false, bool projradius = false);
+    // the energy of one ray in the frame of an emitter/observer with angular velocity V at the ray's current
+    // position (what redshift_start() stores in Ray::emit for every ray)
+    inline T emit_energy(const Ray<T>& ray, T V, bool reverse = false, bool projradius = false) const;
     void redshift(T V, bool reverse = false, bool projradius = false, int motion = 0);
     void redshift(RayDestination<T>* dest, bool reverse = false, bool projradius = false, int motion = 0);
-	inline T ray_redshift( T V, bool reverse, bool projradius, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit, int motion = 0 );
-    inline T ray_redshift( const T et[4], bool reverse, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit );
+	inline T ray_redshift( T V, bool reverse, bool projradius, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit, int motion = 0 ) const;
+    inline T ray_redshift( const T et[4], bool reverse, T r, T theta, T phi, T k, T h, T Q, int rdot_sign, int thetadot_sign, T emit ) const;
 
     void range_phi(T min = -1 * M_PI, T max = M_PI);
 

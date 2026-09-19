@@ -29,6 +29,17 @@ public:
 
 	void init_image_plane(T D, T incl, T phi0, T x0, T xmax, T dx, T y0, T ymax, T dy);
 
+	// Initial data of the ray that arrives at image-plane position (x, y) (rg), for a plane at distance D,
+	// inclination incl (RADIANS) and azimuth phi0: position, momentum, constants of motion, direction signs,
+	// alpha/beta.  init_image_plane() calls this for every pixel; applications that need rays at arbitrary
+	// positions (the caustic bundle tracer) call it directly.  The two-argument form uses this plane's
+	// geometry.
+	void init_ray(Ray<T>& ray, T x, T y, T D, T incl, T phi0) const;
+	void init_ray(Ray<T>& ray, T x, T y) const { init_ray(ray, x, y, D, incl * M_PI / 180, phi0); }
+	T get_dist() const { return D; }
+	T get_incl() const { return incl; }       // degrees
+	T get_phi0() const { return phi0; }
+
 	void redshift_start( );
 	void redshift(bool projradius);
 	using Raytracer<T>::redshift;

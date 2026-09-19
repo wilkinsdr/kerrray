@@ -22,6 +22,7 @@
 //   g++ -O2 -std=c++17 -fopenmp -I src src/tests/caustic_3d_test.cpp src/raytracer/raytracer.cpp src/raytracer/imageplane.cpp
 //
 #include <iostream>
+#include <sstream>
 #include <iomanip>
 #include <cmath>
 #include <vector>
@@ -49,23 +50,12 @@ static RunResult run_schwarzschild(double dist, double delta, double extent, int
 {
     const double spin = 0, incl = 60, phi0 = 0;
     const double dx = 2*extent / Ngrid * (1 - 1e-9);
-    const double offx[5] = { 0,  delta, -delta, 0, 0 };
-    const double offy[5] = { 0, 0, 0,  delta, -delta };
-    ImagePlane<double>* planes[5];
-    for (int i = 0; i < 5; i++)
-        planes[i] = new ImagePlane<double>(dist, incl, -extent + offx[i], extent + offx[i], dx,
-                                           -extent + offy[i], extent + offy[i], dx, spin, phi0, PRECISION);
-    const Ray<double>* ray_arrays[5];
-    for (int i = 0; i < 5; i++) ray_arrays[i] = planes[i]->rays;
+    ImagePlane<double> plane(dist, incl, -extent, extent, dx, -extent, extent, dx, spin, phi0, PRECISION);
 
-    BundleParams P;
-    P.a = -spin; P.horizon = kerr_horizon<double>(spin); P.h0 = 0.01; P.r_cap = 2*P.horizon;
-    P.max_tstep = MAXDT; P.maxtstep_rlim = MAXDT_RLIM; P.max_phistep = MAXDPHI;
-    P.r_max = 1.1*dist; P.delta = delta; P.delta_max = 100*delta; P.order = 6; P.steplim = SYMP_STEPLIM;
-    P.max_caustics = 32;
+    CausticBundle<double>::Params P = CausticBundle<double>::Params::from_plane(plane, spin, delta, 0.01, PRECISION);
 
     RunResult R;
-    R.nPix = planes[0]->get_count();
+    R.nPix = plane.get_count();
     R.pixels.resize(R.nPix);
     #pragma omp parallel
     {
@@ -73,15 +63,15 @@ static RunResult run_schwarzschild(double dist, double delta, double extent, int
         #pragma omp for schedule(dynamic)
         for (int pix = 0; pix < R.nPix; pix++)
         {
-            BundleRay b[5];
-            if (!bundle_from_rays(ray_arrays, pix, P.a, b)) { R.pixels[pix].status = STATUS_SKIPPED; R.pixels[pix].ncaust = 0; continue; }
-            trace_bundle(b, P, planes[0]->get_x_index(pix), planes[0]->get_y_index(pix),
-                         planes[0]->rays[pix].alpha, planes[0]->rays[pix].beta, local, R.pixels[pix]);
+            CausticBundle<double> b(plane, P, plane.rays[pix].alpha, plane.rays[pix].beta,
+                                    plane.get_x_index(pix), plane.get_y_index(pix));
+            if (b.valid()) b.trace();
+            R.pixels[pix] = b.result();
+            local.insert(local.end(), b.caustics().begin(), b.caustics().end());
         }
         #pragma omp critical
         R.points.insert(R.points.end(), local.begin(), local.end());
     }
-    for (int i = 0; i < 5; i++) delete planes[i];
     return R;
 }
 
@@ -134,35 +124,27 @@ int main()
     check(nonmono == 0, "(b) primary caustic distance increases monotonically with impact parameter");
 
     // (c) parallel initial data: J keeps its sign from the plane to r = 50 for b = 6 (ray at x = 6, y = 0)
+    //     (from the per-step dump of the bundle: columns step tau t r theta phi X Y Z J logscale rflips eqcross)
     {
         const double delta = 1e-4;
-        const double offx[5] = { 0,  delta, -delta, 0, 0 };
-        const double offy[5] = { 0, 0, 0,  delta, -delta };
-        ImagePlane<double>* planes[5];
-        for (int k = 0; k < 5; k++)
-            planes[k] = new ImagePlane<double>(dist, 60, 6 + offx[k], 6 + offx[k], 1, offy[k], offy[k], 1, 0, 0, PRECISION);
-        const Ray<double>* ray_arrays[5];
-        for (int k = 0; k < 5; k++) ray_arrays[k] = planes[k]->rays;
-        BundleRay b[5];
-        bundle_from_rays(ray_arrays, 0, 0.0, b);
-        MinoStepper<double> st[5] = { MinoStepper<double>(0, b[0].k, b[0].h, 6), MinoStepper<double>(0, b[1].k, b[1].h, 6),
-                                      MinoStepper<double>(0, b[2].k, b[2].h, 6), MinoStepper<double>(0, b[3].k, b[3].h, 6),
-                                      MinoStepper<double>(0, b[4].k, b[4].h, 6) };
-        const double J0 = bundle_jacobian(b, 0.0, delta);
+        ImagePlane<double> plane(dist, 60, -8, 8, 1, -8, 8, 1, 0, 0, PRECISION);
+        CausticBundle<double>::Params P = CausticBundle<double>::Params::from_plane(plane, 0.0, delta, 0.01, PRECISION);
+        CausticBundle<double> b(plane, P, 6.0, 0.0);
+        const double J0 = b.jacobian();
+        stringstream dump;
+        b.trace(&dump);
         double Jmin_rel = 1;
-        double r = dist;
-        for (int step = 0; step < 100000 && r > 50; step++)
+        string line;
+        while (getline(dump, line))
         {
-            double tdot, phidot, sd;
-            const double h = mino_step_size<double>(r, b[0].s.theta, b[0].k, b[0].h, 0.0, 0.01, 4, MAXDT, MAXDT_RLIM, MAXDPHI, tdot, phidot);
-            bundle_step(b, st, h);
-            mino_r_from_u<double>(b[0].s.u, 0.0, r, sd);
-            const double J = bundle_jacobian(b, 0.0, delta) / (r*r);   // J scales as r^2 through dX/dtau
-            Jmin_rel = min(Jmin_rel, J / (J0 / (dist*dist)));
+            stringstream ls(line);
+            int step; double tau, t, r, theta, phi, X, Y, Z, J, logscale;
+            if (!(ls >> step >> tau >> t >> r >> theta >> phi >> X >> Y >> Z >> J >> logscale)) continue;
+            if (r < 50 || logscale != 0) continue;
+            Jmin_rel = min(Jmin_rel, (J / (r*r)) / (J0 / (dist*dist)));   // J scales as r^2 through dX/dtau
         }
         cout << "  min J(r)/r^2 relative to the image plane between r = 1000 and 50: " << Jmin_rel << endl;
         check(Jmin_rel > 0.5, "(c) ImagePlane rays are parallel: J/r^2 stays within a factor 2 of its initial value down to r = 50");
-        for (int k = 0; k < 5; k++) delete planes[k];
     }
 
     // (d) insensitivity to delta

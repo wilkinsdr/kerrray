@@ -33,3 +33,6 @@ target_link_libraries(caustic_3d_test imageplane raytracer)
 
 add_executable(caustic_ent_test caustic_ent_test.cpp)
 target_link_libraries(caustic_ent_test imageplane raytracer)
+
+add_executable(caustic_bundle_test caustic_bundle_test.cpp)
+target_link_libraries(caustic_bundle_test imageplane raytracer)

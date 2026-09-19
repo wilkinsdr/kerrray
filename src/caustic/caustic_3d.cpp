@@ -9,9 +9,9 @@
 // (ImagePlane initialiser, so the family is parametrised by the image-plane coordinates x, y) until they
 // fall through the horizon or escape past r_max, passing through the equatorial plane.
 //
-// Method: for every image-plane pixel a bundle of five rays is traced in lockstep with the Mino-time
-// symplectic stepper (mino_stepper.h): the centre ray at (x, y) and four offset rays at (x +/- delta, y),
-// (x, y +/- delta).  At every step the Jacobian of the ray family
+// Method: for every image-plane pixel a CausticBundle (caustic_bundle.h) of five rays, built from the
+// ImagePlane with ImagePlane::init_ray, is traced in lockstep with the Mino-time symplectic stepper
+// (mino_stepper.h): the centre ray at (x, y) and four offset rays at (x +/- delta, y), (x, y +/- delta).  At every step the Jacobian of the ray family
 //
 //     J(tau) = det[ dX/dx , dX/dy , dX/dtau ]
 //
@@ -75,7 +75,6 @@ using namespace std;
 
 #include "../raytracer/imageplane.h"
 #include "caustic_bundle.h"
-#include "single_ray_bundle.h"
 #include "adaptive_plane.h"
 
 #include "../include/fits_output.h"
@@ -165,40 +164,23 @@ int main(int argc, char **argv)
     cout << "Bundle offset delta = " << delta << ", rescale beyond " << delta_max << endl;
     cout << "*****" << endl << endl;
 
-    // --- ray initialisation: five image planes, offset by +/-delta in x and y ---
-    // b[0] centre, b[1] +x, b[2] -x, b[3] +y, b[4] -y
-    const double offx[5] = { 0,  delta, -delta, 0, 0 };
-    const double offy[5] = { 0, 0, 0,  delta, -delta };
-    ImagePlane<double>* planes[5];
-    for (int i = 0; i < 5; i++)
+    // --- the image plane: one plane; each CausticBundle builds its centre and offset rays from it ---
+    ImagePlane<double> plane(dist, incl, x0, xmax, dx_ip, y0, ymax, dy_ip, spin, plane_phi0, precision);
+    if (plane.get_count() != nPix)
     {
-        planes[i] = new ImagePlane<double>(dist, incl, x0 + offx[i], xmax + offx[i], dx_ip,
-                                           y0 + offy[i], ymax + offy[i], dy_ip, spin, plane_phi0, precision);
-        if (planes[i]->get_count() != nPix)
-        {
-            cerr << "Error: image plane " << i << " has " << planes[i]->get_count()
-                 << " rays, expected " << nPix << endl;
-            return 1;
-        }
+        cerr << "Error: image plane has " << plane.get_count() << " rays, expected " << nPix << endl;
+        return 1;
     }
 
-    BundleParams P;
-    P.a = -spin;               // ImagePlane traces backwards in time by negating the spin
-    P.horizon = r_horizon;
-    P.h0 = (symp_step > 0) ? symp_step : 1.0 / precision;
-    P.r_cap = 2 * r_horizon;
+    CausticBundle<double>::Params P = CausticBundle<double>::Params::from_plane(plane, spin, delta, symp_step, precision);
     P.max_tstep = max_tstep;
     P.maxtstep_rlim = maxtstep_rlim;
     P.max_phistep = max_phistep;
     P.r_max = r_max;
-    P.delta = delta;
     P.delta_max = delta_max;
     P.order = symp_order;
     P.steplim = steplim;
     P.max_caustics = max_caustics;
-
-    const Ray<double>* ray_arrays[5];
-    for (int i = 0; i < 5; i++) ray_arrays[i] = planes[i]->rays;
 
     // --- per-pixel results ---
     vector<PixelResult> results(nPix);
@@ -228,25 +210,12 @@ int main(int argc, char **argv)
                 }
             }
 
-            const int ix = planes[0]->get_x_index(pix);
-            const int iy = planes[0]->get_y_index(pix);
-            const double ximg = planes[0]->rays[pix].alpha;
-            const double yimg = planes[0]->rays[pix].beta;
-
-            BundleRay b[5];
-            const bool ok = bundle_from_rays(ray_arrays, pix, P.a, b);
-
-            PixelResult& res = results[pix];
-            if (!ok)
-            {
-                // e.g. the x = y = 0 ray, whose constants of motion are undefined in ImagePlane
-                res.status = STATUS_SKIPPED;
-                res.ncaust = 0; res.eqcross = 0; res.tau_end = 0;
-                res.r1 = res.theta1 = res.phi1 = 0;
-                continue;
-            }
-
-            trace_bundle(b, P, ix, iy, ximg, yimg, local, res);
+            CausticBundle<double> b(plane, P, plane.rays[pix].alpha, plane.rays[pix].beta,
+                                    plane.get_x_index(pix), plane.get_y_index(pix));
+            // invalid: e.g. the x = y = 0 ray, whose constants of motion are undefined in ImagePlane
+            if (b.valid()) b.trace();
+            results[pix] = b.result();
+            local.insert(local.end(), b.caustics().begin(), b.caustics().end());
         }
 
         #pragma omp critical
@@ -281,9 +250,6 @@ int main(int argc, char **argv)
             int done_pts = 0;
             #pragma omp parallel
             {
-                SingleRayBundle* srb;
-                #pragma omp critical
-                srb = new SingleRayBundle(dist, incl, plane_phi0, spin, delta, precision);
                 vector<CausticPoint> local;
 
                 #pragma omp for schedule(dynamic)
@@ -302,23 +268,13 @@ int main(int argc, char **argv)
                     }
                     const int k = created[m];
                     const PlanePoint& pt = aplane.point(k);
-                    PixelResult& res = results[k];
-                    BundleRay b[5];
-                    if (!srb->init(pt.x, pt.y, b))
-                    {
-                        res.status = STATUS_SKIPPED; res.ncaust = 0; res.eqcross = 0; res.tau_end = 0;
-                        res.r1 = res.theta1 = res.phi1 = 0;
-                        continue;
-                    }
-                    const size_t before = local.size();
-                    trace_bundle(b, P, static_cast<int>(pt.i), static_cast<int>(pt.j), pt.x, pt.y, local, res);
-                    for (size_t q = before; q < local.size(); q++) local[q].level = pt.level;
+                    CausticBundle<double> b(plane, P, pt.x, pt.y, static_cast<int>(pt.i), static_cast<int>(pt.j), pt.level);
+                    if (b.valid()) b.trace();
+                    results[k] = b.result();
+                    local.insert(local.end(), b.caustics().begin(), b.caustics().end());
                 }
                 #pragma omp critical
-                {
-                    caustics.insert(caustics.end(), local.begin(), local.end());
-                    delete srb;
-                }
+                caustics.insert(caustics.end(), local.begin(), local.end());
             }
             rprog.done();
         }
@@ -335,21 +291,16 @@ int main(int argc, char **argv)
         if (sscanf(dump_pixel.c_str(), "%d,%d", &dix, &diy) == 2 && dix >= 0 && dix < img_Nx && diy >= 0 && diy < img_Ny)
         {
             const int pix = dix * img_Ny + diy;
-            BundleRay b[5];
-            bundle_from_rays(ray_arrays, pix, P.a, b);
             ofstream dump(dump_file.c_str());
             dump << "# step tau t r theta phi X Y Z J logscale rflips eqcross   (pixel " << dix << "," << diy
-                 << " x=" << planes[0]->rays[pix].alpha << " y=" << planes[0]->rays[pix].beta << ")\n";
-            vector<CausticPoint> dummy;
-            PixelResult dres;
-            trace_bundle(b, P, dix, diy, planes[0]->rays[pix].alpha, planes[0]->rays[pix].beta, dummy, dres, &dump);
+                 << " x=" << plane.rays[pix].alpha << " y=" << plane.rays[pix].beta << ")\n";
+            CausticBundle<double> b(plane, P, plane.rays[pix].alpha, plane.rays[pix].beta, dix, diy);
+            if (b.valid()) b.trace(&dump);
             cout << "Wrote ray dump for pixel (" << dix << "," << diy << ") to " << dump_file << endl;
         }
         else
             cerr << "Warning: dump_pixel must be \"ix,iy\" within the image; ignored" << endl;
     }
-
-    for (int i = 0; i < 5; i++) delete planes[i];
 
     sort(caustics.begin(), caustics.end(), [](const CausticPoint& p, const CausticPoint& q)
     {

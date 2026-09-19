@@ -36,11 +36,18 @@ static void check(bool ok, const string& msg)
 
 struct PlaneSet
 {
-    ImagePlane<double>* planes[5];
-    const Ray<double>* rays[5];
-    BundleParams P;
+    ImagePlane<double>* plane;
+    CausticBundle<double>::Params P;
     int nPix, img_Nx, img_Ny;
     double x0, y0, dx, dy;
+    // a traced bundle for pixel pix (nullptr-safe: invalid bundles are returned untraced)
+    CausticBundle<double> bundle(int pix) const
+    {
+        CausticBundle<double> b(*plane, P, plane->rays[pix].alpha, plane->rays[pix].beta,
+                                plane->get_x_index(pix), plane->get_y_index(pix));
+        if (b.valid()) b.trace();
+        return b;
+    }
 };
 
 static PlaneSet make_planes(double dist, double incl, double spin, double x0, double xmax, int Nx, double delta,
@@ -48,25 +55,12 @@ static PlaneSet make_planes(double dist, double incl, double spin, double x0, do
 {
     PlaneSet S;
     const double dx = (xmax - x0) / Nx, dx_ip = dx * (1 - 1e-9);
-    const double offx[5] = { 0, delta, -delta, 0, 0 }, offy[5] = { 0, 0, 0, delta, -delta };
-    for (int i = 0; i < 5; i++)
-    {
-        S.planes[i] = new ImagePlane<double>(dist, incl, x0 + offx[i], xmax + offx[i], dx_ip,
-                                             x0 + offy[i], xmax + offy[i], dx_ip, spin, 0, PRECISION);
-        S.planes[i]->redshift_start();
-        S.rays[i] = S.planes[i]->rays;
-    }
+    S.plane = new ImagePlane<double>(dist, incl, x0, xmax, dx_ip, x0, xmax, dx_ip, spin, 0, PRECISION);
+    S.plane->redshift_start();
     S.img_Nx = S.img_Ny = Nx + 1;
     S.nPix = S.img_Nx * S.img_Ny;
     S.x0 = S.y0 = x0; S.dx = S.dy = dx;
-    S.P.a = -spin;
-    S.P.horizon = kerr_horizon<double>(spin);
-    S.P.h0 = 1.0 / PRECISION;
-    S.P.r_cap = 2 * S.P.horizon;
-    S.P.max_tstep = MAXDT; S.P.maxtstep_rlim = MAXDT_RLIM; S.P.max_phistep = MAXDPHI;
-    S.P.r_max = 1.1 * dist;
-    S.P.delta = delta; S.P.delta_max = 100 * delta;
-    S.P.order = 6; S.P.steplim = SYMP_STEPLIM; S.P.max_caustics = 32;
+    S.P = CausticBundle<double>::Params::from_plane(*S.plane, spin, delta, -1, PRECISION);
     S.P.max_eqcross = max_eqcross;
     return S;
 }
@@ -93,14 +87,13 @@ int main()
         int compared = 0;
         for (int pix = 0; pix < S.nPix; pix++)
         {
-            BundleRay b[5];
-            if (!bundle_from_rays(S.rays, pix, S.P.a, b)) continue;
-            vector<CausticPoint> cp; vector<DiscCrossing> dc; PixelResult res;
-            trace_bundle(b, S.P, 0, 0, 0, 0, cp, res, nullptr, &dc);
+            CausticBundle<double> b = S.bundle(pix);
+            if (!b.valid()) continue;
+            const vector<DiscCrossing>& dc = b.disc_crossings();
             const Ray<double>& R = ref.rays[pix];
             if (dc.empty() || !(R.status & RAY_STATUS_DEST) || fabs(R.theta - M_PI_2) > 1e-6) continue;
             if (dc[0].r < 1.05 * kerr_horizon<double>(spin)) continue;
-            const double g = disc_crossing_redshift(*S.planes[0], dc[0], S.P.a, S.planes[0]->rays[pix].emit);
+            const double g = b.disc_redshift(dc[0]);
             max_dr   = max(max_dr,   fabs(dc[0].r - R.r) / R.r);
             max_dphi = max(max_dphi, fabs(atan2(sin(dc[0].phi - R.phi), cos(dc[0].phi - R.phi))));
             max_dt   = max(max_dt,   fabs(dc[0].t - R.t));
@@ -112,7 +105,7 @@ int main()
         check(compared > 100, "enough rays land on the disc");
         check(max_dr < 1e-6 && max_dphi < 1e-6 && max_dt < 1e-4, "(a1) landing r, phi, t agree with the raytracer");
         check(max_dg < 1e-8, "(a2) disc redshift agrees with ImagePlane::redshift");
-        for (int i = 0; i < 5; i++) delete S.planes[i];
+        delete S.plane;
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -125,12 +118,11 @@ int main()
         double max_err = 0; int compared = 0;
         for (int pix = 0; pix < S.nPix; pix++)
         {
-            BundleRay b[5];
-            if (!bundle_from_rays(S.rays, pix, S.P.a, b)) continue;
-            vector<CausticPoint> cp; vector<DiscCrossing> dc; PixelResult res;
-            trace_bundle(b, S.P, 0, 0, 0, 0, cp, res, nullptr, &dc);
+            CausticBundle<double> b = S.bundle(pix);
+            if (!b.valid()) continue;
+            const vector<DiscCrossing>& dc = b.disc_crossings();
             if (dc.empty() || dc[0].r < 6) continue;
-            const double g = disc_crossing_redshift(*S.planes[0], dc[0], S.P.a, S.planes[0]->rays[pix].emit);
+            const double g = b.disc_redshift(dc[0]);
             // E_disc / E_obs = u^t sqrt(1 - 2/dist): the image plane sits at finite distance, where the
             // static observer's energy is E / sqrt(1 - 2/dist)
             const double g_exact = sqrt(1 - 2 / dist) / sqrt(1 - 3 / dc[0].r);
@@ -139,7 +131,7 @@ int main()
         }
         cout << "  " << compared << " pixels with r >= 6: max relative error " << scientific << max_err << fixed << endl;
         check(compared > 50 && max_err < 1e-4, "(b) E_disc/E_obs = sqrt(1 - 2/dist) / sqrt(1 - 3/r) for the face-on direct image");
-        for (int i = 0; i < 5; i++) delete S.planes[i];
+        delete S.plane;
     }
 
     // ------------------------------------------------------------------------------------------------
@@ -153,12 +145,11 @@ int main()
         int consistent = 0, total = 0;
         for (int pix = 0; pix < S.nPix; pix++)
         {
-            BundleRay b[5];
-            if (!bundle_from_rays(S.rays, pix, S.P.a, b)) continue;
-            const double J0 = bundle_jacobian(b, S.P.a, S.P.delta);
-            vector<CausticPoint> cp; vector<DiscCrossing> dc; PixelResult res;
-            trace_bundle(b, S.P, 0, 0, 0, 0, cp, res, nullptr, &dc);
-            for (auto& d : dc)
+            CausticBundle<double> b(*S.plane, S.P, S.plane->rays[pix].alpha, S.plane->rays[pix].beta);
+            if (!b.valid()) continue;
+            const double J0 = b.jacobian();
+            b.trace();
+            for (auto& d : b.disc_crossings())
             {
                 if (!isfinite(d.J) || d.J == 0) continue;
                 const int expect = ((d.ncaust % 2) == 0) ? 1 : -1;
@@ -169,7 +160,7 @@ int main()
         }
         cout << "  " << consistent << " / " << total << " crossings have sign(J) = (-1)^ncaust sign(J_plane)" << endl;
         check(total > 500 && consistent == total, "(c) J at the disc crossings flips sign exactly at the recorded caustics");
-        for (int i = 0; i < 5; i++) delete S.planes[i];
+        delete S.plane;
     }
 
     // ------------------------------------------------------------------------------------------------
