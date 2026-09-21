@@ -107,12 +107,14 @@ int main(int argc, char** argv)
     // --- Kerr (Schwarzschild by default) run: sum over the image plane ---
     const double dx = (xmax - x0) / Nx;
     ImagePlane<double> plane(dist, incl, x0, xmax, dx, x0, xmax, dx, spin, 0.0);
-    SphericalCorona<double> corona(R_corona, I_corona);
+    SphericalContinuumSource<double> corona(R_corona, I_corona);
     DiscWithISCODestination<double> disc(r_isco, r_out_disc);
     const RayDestination<double>* disc_ptr = (r_out_disc > 0) ? &disc : nullptr;
     if (disc_ptr) cout << "Disc enabled: ISCO at " << r_isco << ", outer edge " << r_out_disc << endl;
-    RayTransfer<double> rt(plane, spin, wind, line, bins, disc_ptr, &corona, 6, -1, -1, SYMP_STEPLIM,
-                            max_tstep, MAXDPHI, MAXDT_RLIM, source_mode, density_scale);
+    RayTransfer<double> rt(plane, spin, wind, line, bins, Nx, Nx, x0, dx, x0, dx, disc_ptr, &corona,
+                            source_mode, density_scale);
+    rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT); symplectic
+                                    // step/order left at their defaults (1/PRECISION, order 6)
 
     vector<double> kerr_line(n_energy, 0.0), kerr_total(n_energy, 0.0);
     double kerr_continuum_total = 0;

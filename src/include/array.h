@@ -12,6 +12,7 @@
 #define ARRAY_H_
 
 #include <fstream>
+#include <iostream>
 
 template<typename T>
 class Array
@@ -52,12 +53,12 @@ public:
             ptr[i] = 0;
     }
 
-    void write(ofstream *outfile)
+    void write(std::ofstream *outfile)
     {
         outfile->write(reinterpret_cast<char *> (ptr), num * sizeof(T));
     }
 
-    void read(ifstream *infile)
+    void read(std::ifstream *infile)
     {
         infile->read(reinterpret_cast<char *> (ptr), num * sizeof(T));
     }
@@ -67,7 +68,7 @@ public:
     {
         if(num != other.num)
         {
-            cerr << "Array ERROR: Cannot divide arrays with different dimensions";
+            std::cerr << "Array ERROR: Cannot divide arrays with different dimensions";
             return;
         }
         for(int i = 0; i < num; i++)
@@ -79,7 +80,7 @@ public:
     {
         if(num != other.num)
         {
-            cerr << "Array ERROR: Cannot add arrays with different dimensions";
+            std::cerr << "Array ERROR: Cannot add arrays with different dimensions";
             return;
         }
         for(int i = 0; i < num; i++)
@@ -163,12 +164,12 @@ public:
             ptr[0][i] = 0;
     }
 
-    void write(ofstream *outfile)
+    void write(std::ofstream *outfile)
     {
         outfile->write(reinterpret_cast<char *> (ptr[0]), num_x * num_y * sizeof(T));
 	}
 
-	void read(ifstream* infile)
+	void read(std::ifstream* infile)
 	{
 		infile->read(reinterpret_cast<char*> (ptr[0]), num_x * num_y * sizeof(T));
 	}
@@ -178,7 +179,7 @@ public:
 	{
 		if(num_x != other.num_x || num_y != other.num_y)
 		{
-			cerr << "Array2D ERROR: Cannot divide arrays with different dimensions";
+			std::cerr << "Array2D ERROR: Cannot divide arrays with different dimensions";
 			return;
 		}
 		for(int i=0; i<num_x*num_y; i++)
@@ -211,7 +212,7 @@ public:
 	{
 		if(num_x != other.num_x || num_y != other.num_y)
 		{
-			cerr << "Array2D ERROR: Cannot add arrays with different dimensions";
+			std::cerr << "Array2D ERROR: Cannot add arrays with different dimensions";
 			return;
 		}
 		for(int i=0; i<num_x*num_y; i++)
@@ -290,12 +291,12 @@ public:
             pool[i] = 0;
     }
 
-    void write(ofstream *outfile)
+    void write(std::ofstream *outfile)
     {
         outfile->write(reinterpret_cast<char *> (ptr[0][0]), num_x * num_y * num_z * sizeof(T));
 	}
 
-	void read(ifstream* infile)
+	void read(std::ifstream* infile)
 	{
 		infile->read(reinterpret_cast<char*> (ptr[0][0]), num_x * num_y * num_z * sizeof(T));
 	}
@@ -305,7 +306,7 @@ public:
     {
         if(num_x != other.num_x || num_y != other.num_y || num_z != other.num_z)
         {
-            cerr << "Array3D ERROR: Cannot divide arrays with different dimensions";
+            std::cerr << "Array3D ERROR: Cannot divide arrays with different dimensions";
             return;
         }
         for(int i=0; i<num_x*num_y*num_z; i++)
@@ -338,7 +339,7 @@ public:
     {
         if(num_x != other.num_x || num_y != other.num_y || num_z != other.num_z)
         {
-            cerr << "Array3D ERROR: Cannot divide arrays with different dimensions";
+            std::cerr << "Array3D ERROR: Cannot divide arrays with different dimensions";
             return;
         }
         for(int i=0; i<num_x*num_y*num_z; i++)

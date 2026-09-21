@@ -1053,3 +1053,224 @@ qualitatively different from the P-Cygni shape the spherical/disc geometries giv
 inclination. (A more face-on/polar inclination would flip this: the direct sightline would then thread the
 polar cone instead, restoring an absorption trough for the polar-collimated case and likely removing it
 for the disc-launched one -- not tested here, but a direct, cheap follow-up given the machinery now exists.)
+
+## 5.24  `RayTransfer::run_raytrace`: moving the pixel loop into the class
+
+Pure restructuring, requested to bring `RayTransfer` closer to `Raytracer`'s own philosophy (a class that
+owns and fills its own results array via `run_raytrace()`, rather than handing the per-pixel loop back to
+the caller -- `Raytracer::rays` is the precedent, a public member array `run_raytrace()` populates
+in-place). `ray_transfer_disc_wind.cpp`'s image-plane row loop (the `#pragma omp parallel for` block that
+called `trace_pixel` per pixel and accumulated `continuum_map`/`tau_map`/`flux_cube`/`spec_line`/
+`spec_total`/`continuum_total`/`n_corona`/`tau_corona_max`) moved into a new `RayTransfer<T>::run_raytrace
+(int Nx, int Ny, T x0, T dx, T y0, T dy, int show_progress = 1)`, with those eight quantities now public
+members of `RayTransfer`, filled by that call (`continuum_map`/`tau_map` as `unique_ptr<Array2D<T>>`,
+`flux_cube` as `unique_ptr<Array3D<T>>`, allocated once `Nx`/`Ny`/`n_energy` are known). `trace_pixel`
+itself is untouched -- `run_raytrace` is purely the same loop body moved up a level, `x0`/`dx`/`y0`/`dy`
+still passed in explicitly rather than read back off `plane` (which keeps them private, and
+raytracer.h/.cpp stay untouched per this doc's original constraint, Sec 1). `ray_transfer_disc_wind.cpp`
+now just calls `rt.run_raytrace(Nx, Ny, x0, dx, y0, dy)` and reads the results straight off `rt` for the
+FITS/CSV writers. `ray_transfer_kerr_vs_flat.cpp` was left as is (its own loop differs enough --
+two backends, no FITS output -- that folding it in wasn't part of this request).
+
+**Bug this surfaced, unrelated to the restructuring's own logic**: `src/include/array.h` used bare
+`ofstream`/`ifstream`/`cerr` with no `#include <iostream>` and no `std::` qualification, relying on every
+existing includer having already done `using namespace std;` first. `ray_transfer.h` is a proper header
+(no such `using namespace`), so including `array.h` there (needed for the new `Array2D`/`Array3D` members)
+failed to compile. Fixed by making `array.h` self-contained (`#include <iostream>`, `std::` qualifiers) --
+a leaky-header fix required to make the restructuring possible at all, not a behavioural change for any
+existing caller (they already had `using namespace std;` active, so this is a no-op for them).
+
+**Verification**: built both the pre- and post-restructuring code (`git stash`/`stash pop` around the
+change) and ran `ray_transfer_disc_wind` on the same par file (a smaller 24x24/30-energy-bin grid for
+speed, `OMP_NUM_THREADS=1` on both runs so the `#pragma omp critical` merge order is deterministic and a
+diff is meaningful rather than lost in thread-interleaving noise) -- the spectrum CSV was byte-identical,
+every stdout diagnostic (corona hit count, peak/mean tau, `tau_corona_max`) matched exactly, and every one
+of the 33 FITS HDUs (`CONTINUUM`, `TAU`, and all 30 `FLUX` cube frames) was bit-identical between the two
+builds (checked with `astropy.io.fits` + `numpy.array_equal`, not just eyeballed). Confirms this was a pure
+restructuring with no change to the physics or the accumulated results.
+
+## 5.25  Moving the grid itself (Nx/Ny/x0/dx/y0/dy) into the constructor
+
+Follow-up restructuring, same motivation as Sec 5.24: `ImagePlane`'s own constructor sets up its ray grid
+directly (`raytracer/imageplane.cpp`) rather than taking it on a later call, so `RayTransfer`'s grid should
+work the same way. `Nx, Ny, x0, dx, y0, dy` moved from `run_raytrace()`'s argument list into the
+constructor (as required, no-default parameters, positioned right after `bins` -- before every other,
+defaulted, constructor argument); `continuum_map`/`tau_map`/`flux_cube`/`spec_line`/`spec_total` are now
+allocated/sized there too, as soon as `Nx`/`Ny`/`bins.energy.size()` are known, rather than on the first
+`run_raytrace()` call. `run_raytrace(int show_progress = 1)` now reads the grid off private members
+(`m_Nx`, `m_Ny`, `m_x0`, `m_dx`, `m_y0`, `m_dy`) it stores at construction, and re-zeroes (rather than
+reallocates) the result arrays each call, so calling it more than once on the same object still works.
+Added `get_Nx()`/`get_Ny()` accessors alongside (the grid dimensions are otherwise only visible via
+`continuum_map->size_x()`/`size_y()`, once a run has actually filled it in).
+
+This still isn't `plane`'s own grid -- `RayTransfer` only ever calls `plane.init_ray(x, y)` at positions of
+its own choosing, and `ImagePlane` keeps its internal `Nx`/`Ny`/`x0` etc. private with a different
+pixel-center convention (raytracer.h/.cpp are still not touched, per Sec 1's original constraint), so the
+caller still passes its grid to `RayTransfer`'s constructor explicitly, just once now instead of once at
+construction and again at `run_raytrace()`.
+
+Every constructor call site needed updating: `ray_transfer_disc_wind.cpp` (`RayTransfer` at the same `Nx`,
+`Ny`, `x0`, `dx`, `y0`, `dy` it already had; `run_raytrace()` now takes no arguments),
+`ray_transfer_kerr_vs_flat.cpp` (which doesn't call `run_raytrace()` at all -- its own loop structure
+differs too much, Sec 5.24 -- so its `RayTransfer` construction just needed the grid params added,
+`(Nx, Nx, x0, dx, x0, dx)` matching its own square, `Nx`-both-directions grid), and
+`ray_transfer_disc_wind_test.cpp`'s two `RayTransfer` constructions (neither calls `run_raytrace()` either,
+both drive `trace_pixel()` on their own explicit `x`/`y` loops -- passed placeholder
+`(1, 1, 0.0, 1.0, 0.0, 1.0)`, since the constructor now allocates *something* regardless of whether that
+grid is ever used).
+
+**Verification**: same method as Sec 5.24 -- `git stash`/`stash pop` back to the original, pre-session
+commit (`a0d9177`), rebuilt, and re-ran `ray_transfer_disc_wind` on the same 24x24/30-bin par file with
+`OMP_NUM_THREADS=1` on both sides. Spectrum CSV and every stdout diagnostic were identical to the original
+commit's output, confirming this second restructuring step is, like the first, physics-neutral. Both unit
+tests (`ray_transfer_pcygni_test`, `ray_transfer_disc_wind_test`) still pass with identical numbers.
+
+## 5.26  Symplectic integrator controls as setters, matching `Raytracer`
+
+Third restructuring step, same "match `Raytracer`'s philosophy" motivation as Sec 5.24-5.25:
+`Raytracer` doesn't take `symp_step`/`symp_order`/`max_tstep` as constructor arguments -- it defaults them
+internally and exposes `set_symplectic_step()`/`set_symplectic_order()`/`set_max_tstep()` to override before
+`run_raytrace()` (`raytracer.h`; `emissivity.cpp` calls these conditionally, only when
+`integrator == Integrator::Symplectic`). `RayTransfer` is always the symplectic backend, so it now follows
+the same pattern unconditionally: `symp_order`, `symp_step`, `max_tstep`, `max_phistep`, `maxtstep_rlim`
+were removed from the constructor's argument list (constructor now just takes `disc`, `corona`, `r_max`,
+`steplim`, `source_mode`, `density_scale` after the grid params) and replaced by
+`set_symplectic_step(T h0)`, `set_symplectic_order(int order)` and `set_max_tstep(T max, T rlim =
+MAXDT_RLIM)` (`get_symplectic_step()`/`get_symplectic_order()` added alongside, mirroring `Raytracer`'s own
+getters). `max_phistep` keeps its `MAXDPHI` default with no setter (as before, every call site always used
+the library-wide default here, so there was no need for a setter) -- if `set_*` is never called, the class
+uses exactly the same defaults the constructor's removed parameters used to default to (order 6, step -1
+i.e. `1/PRECISION`, `max_tstep = MAXDT`, `maxtstep_rlim = MAXDT_RLIM`), so this is a pure API change, not a
+default-value change.
+
+`ray_transfer_disc_wind.cpp` and `ray_transfer_kerr_vs_flat.cpp` (the two applications that actually read
+`max_tstep`/`symp_step`/`symp_order` from a par file) now call the setters right after constructing `rt`,
+before `run_raytrace()`/the pixel loop -- unconditionally, since there is no integrator choice to gate on
+here (unlike `emissivity.cpp`'s `if (integrator == Integrator::Symplectic)`). `ray_transfer_disc_wind_test.cpp`'s
+two constructions needed no change at all: they already relied on the constructor's now-removed integrator
+parameters staying at their defaults, so dropping those parameters entirely changes nothing for them.
+
+**Verification**: same method as Sec 5.24-5.25 -- `git stash`/`stash pop` back to `a0d9177`, rebuilt, and
+re-ran `ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides.
+Spectrum CSV and every stdout diagnostic were identical to the original commit's output. Both unit tests
+still pass with identical numbers.
+
+## 5.27  `r_max`/`steplim` as `run_raytrace()` arguments, resolved against the plane's own distance
+
+Fourth restructuring step, same "match `Raytracer`" motivation as Sec 5.24-5.26: `Raytracer::run_raytrace()`
+takes `r_max`/`steplim` as call arguments, not constructor state, with the low-level `propagate*()` methods
+receiving them as explicit parameters rather than reading class members (`raytracer.h`/`.cpp`). `r_max` and
+`steplim` moved out of `RayTransfer`'s constructor into `trace_pixel()` and `run_raytrace()` as optional
+trailing parameters (`T r_max = -1, int steplim = -1` on both); the private `m_r_max`/`m_steplim` members
+that used to hold them are gone.
+
+The one thing `Raytracer::run_raytrace()` does *not* need to worry about -- a literal default for `r_max`
+that's safe for any observer distance -- `RayTransfer` still does (the file already explains why: a fixed
+default like `Raytracer`'s own `r_max = 1000` would put the escape radius at or inside the image plane
+itself for any realistic, larger `dist`). So the non-positive default is resolved *inside* `trace_pixel()`
+itself (`r_max_eff = (r_max > 0) ? r_max : T(1.1) * m_plane.get_dist()`, `m_plane` being accessible since
+`RayTransfer` always composes a `plane` reference) rather than requiring the caller to know `dist` -- calling
+either method with no arguments reproduces the exact same default the constructor used to compute once at
+construction time. `run_raytrace()` resolves both once (not once per pixel, matching how `run_raytrace()`
+computes `effective_steplim` once before its own pixel loop) and passes the resolved values through to
+every `trace_pixel()` call; a caller of `trace_pixel()` directly (`ray_transfer_kerr_vs_flat.cpp`'s own
+loop, the two `ray_transfer_disc_wind_test.cpp` checks) gets the same resolution per call if it doesn't
+pass its own `r_max`/`steplim`.
+
+Call-site changes: `ray_transfer_disc_wind.cpp` and `ray_transfer_kerr_vs_flat.cpp`'s `RayTransfer`
+constructions just dropped the now-gone `-1, SYMP_STEPLIM` (or `-1, -1`) trailing arguments -- both
+applications already relied on the default resolution, never customising `r_max`/`steplim` from a par file,
+so nothing else needed to change. `ray_transfer_disc_wind_test.cpp`'s two constructions and direct
+`trace_pixel()` calls needed no changes at all (they never passed these arguments either).
+
+**Verification**: same method as Sec 5.24-5.26 -- `git stash`/`stash pop` back to `a0d9177`, rebuilt, and
+re-ran `ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides.
+Spectrum CSV and every stdout diagnostic were identical to the original commit's output. Both unit tests
+still pass with identical numbers.
+
+## 5.28  Splitting `RTField` and its wind models into `rtfield.h`/`.cpp`
+
+Pure file reorganisation, requested so new wind/material geometries can be added without the core
+`ray_transfer.h`/`.cpp` growing with them. `RTField<T>` (the abstract material interface),
+`SphericalBetaWind<T>`, `WindLatitudeMode` and `ConicalBetaWind<T>` moved out to a new
+`src/ray_transfer/rtfield.h` (declarations + `ConicalBetaWind`'s fully-inline body, since it only delegates
+to a `SphericalBetaWind` member) and `rtfield.cpp` (`SphericalBetaWind`'s out-of-line methods, which need
+`kerr.h`'s `kerr_metric`/`tetrad`, plus the explicit `template class` instantiations for all three).
+`ray_transfer.h` now just `#include`s `rtfield.h` in place of the removed definitions -- every application
+and test still only includes `ray_transfer.h` and sees exactly the same types, so no application code
+changed at all beyond build plumbing. `Corona`/`SphericalCorona` (a separate hierarchy, not requested) and
+`dilution_factor`/`accumulate_step`/`FlatRayTransfer`/`RayTransfer` (which use `RTField` but aren't part of
+it) stayed in `ray_transfer.h`/`.cpp`.
+
+Build plumbing updated: `src/ray_transfer/CMakeLists.txt`'s `ray_transfer` library now lists `rtfield.cpp`
+alongside `ray_transfer.cpp`; the two ray_transfer tests' standalone-build comment headers
+(`ray_transfer_pcygni_test.cpp`, `ray_transfer_disc_wind_test.cpp` -- these compile without cfitsio by
+listing their `.cpp` dependencies directly to `g++`, bypassing CMake) gained `src/ray_transfer/rtfield.cpp`
+in that list. (Confirmed in passing, unrelated to this change: `ray_transfer_pcygni_test.cpp`'s documented
+standalone build command was already missing `raytracer.cpp`/`imageplane.cpp` even before this split --
+`RayTransfer<double>`'s explicit instantiation in `ray_transfer.cpp` pulls in `ImagePlane`/`Raytracer`
+symbols regardless of whether the test itself exercises `RayTransfer`, so that command has never actually
+linked; pre-existing, not touched here since it wasn't part of what was asked. `ray_transfer_disc_wind_test.cpp`'s
+own command already listed both files and links correctly.)
+
+**Verification**: same method as Sec 5.24-5.27 -- `git stash`/`stash pop` back to `a0d9177`, rebuilt, and
+re-ran `ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides.
+Spectrum CSV and every stdout diagnostic were identical to the original commit's output. Both unit tests
+still pass with identical numbers. Additionally rebuilt `ray_transfer_disc_wind_test.cpp`'s standalone
+`g++` command directly (with the new `rtfield.cpp` added) to confirm the documented manual build path
+still links and runs (`ALL TESTS PASSED`) now that `SphericalBetaWind`'s implementation lives in a
+separate translation unit.
+
+## 5.29  `rtfield.cpp` folded back into `rtfield.h` (header-only)
+
+Follow-up simplification: `rtfield.cpp` (Sec 5.28) removed, `SphericalBetaWind`'s five out-of-line member
+functions (constructor, `velocity`, `density`, `four_velocity`, `flat_four_velocity`) moved in-class into
+`rtfield.h` instead. These are templates, so their bodies already had to be visible at every instantiation
+site regardless of which file they were physically written in (the previous split only worked because
+`ray_transfer.cpp` explicitly instantiated `SphericalBetaWind<double>`) -- with as little code as this,
+keeping it in one header is simpler than a separate `.cpp` that bought nothing. `rtfield.h` picked up a
+direct `#include "../include/kerr.h"` (for `kerr_metric`/`tetrad`, used in `four_velocity`) that used to be
+`rtfield.cpp`'s alone; `RTField`/`ConicalBetaWind` needed no changes (already fully in-class, so their
+"explicit instantiation" lines in the old `rtfield.cpp` were never load-bearing -- template classes with no
+out-of-line members instantiate implicitly wherever they're used, same as any other header-only template).
+
+Build plumbing reverted alongside: `src/ray_transfer/CMakeLists.txt`'s `ray_transfer` library is back to
+just `ray_transfer.cpp`, and the two ray_transfer tests' standalone-build comment headers dropped
+`rtfield.cpp` from their `g++` command lines again.
+
+**Verification**: same `git stash`-based method as Sec 5.24-5.28 -- rebuilt against `a0d9177`, re-ran
+`ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides, spectrum
+CSV and stdout diagnostics identical. Both unit tests still pass. Also re-ran `ray_transfer_disc_wind_test`'s
+documented standalone `g++` command (now without `rtfield.cpp`, since there's nothing left to link) to
+confirm it still builds and passes.
+
+## 5.30  Splitting `Corona` into `continuum_source.h`, renamed to `ContinuumSource`
+
+Same reorganisation as Sec 5.28-5.29, for the other abstract interface `RayTransfer` composes: `Corona<T>`
+and `SphericalCorona<T>` moved out to a new `src/ray_transfer/continuum_source.h`, header-only from the
+start this time (learned from Sec 5.28-5.29 rather than repeating the split-then-fold-back cycle) --
+`dilution_factor` moved there too, since it's conceptually part of "how a continuum source's brightness
+falls off with distance" (used by both `SphericalContinuumSource::illumination` and `FlatRayTransfer`'s
+star). `ray_transfer.h` just `#include`s `continuum_source.h` in place of the removed definitions.
+
+Renamed at the same time, per explicit request: `Corona<T>` -> `ContinuumSource<T>`. Asked whether the
+derived class should follow (`SphericalCorona` -> `SphericalContinuumSource`) or keep its specific,
+domain-vocabulary name, since the two `RTField` derived classes (`SphericalBetaWind`, `ConicalBetaWind`)
+never carried their base class's old name either -- the answer was to rename it too, so
+`SphericalCorona<T>` is now `SphericalContinuumSource<T>`, fully consistent with the new base name. Every
+application/test's `corona` variable, `R_corona`/`I_corona`/`RCORONA` par-file and FITS-keyword names, and
+the physical "corona" terminology in doc comments were all left alone -- they describe the astrophysical
+object a `SphericalContinuumSource` instance represents in these applications, not the C++ type, and
+renaming variable names/par-file keys wasn't requested.
+
+Call-site changes: `ray_transfer_disc_wind.cpp`, `ray_transfer_kerr_vs_flat.cpp` and
+`ray_transfer_disc_wind_test.cpp`'s two constructions all changed `SphericalCorona<double> corona(...)` to
+`SphericalContinuumSource<double> corona(...)`; `RayTransfer`'s constructor parameter and the `m_corona`
+member both changed type from `const Corona<T>*` to `const ContinuumSource<T>*` (`ray_transfer.h`/`.cpp`) --
+no call site needed to change how it passes `&corona`, since `SphericalContinuumSource<T>` still derives
+from `ContinuumSource<T>` and implicitly converts. A few doc comments referencing `Corona::illumination`/
+`SphericalCorona::illumination` were updated to the new names.
+
+**Verification**: same `git stash`-based method as Sec 5.24-5.29 -- rebuilt against `a0d9177`, re-ran
+`ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides, spectrum
+CSV and stdout diagnostics identical. Both unit tests still pass with identical numbers.

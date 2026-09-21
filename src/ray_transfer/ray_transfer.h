@@ -24,9 +24,12 @@
  *                        their public API is reused (ImagePlane::init_ray, Raytracer::emit_energy,
  *                        Raytracer::ray_redshift).
  *
- *  The material carrying the line (velocity field + density) is abstracted as RTField; the line itself as
- *  LineTransition (rest energy + local Doppler width + opacity normalisation); the observer-frame
- *  spectral bins as SpectrumGrid.
+ *  The material carrying the line (velocity field + density) is abstracted as RTField and its concrete
+ *  wind models (SphericalBetaWind, ConicalBetaWind), split out into rtfield.h (header-only) so new
+ *  wind/material geometries can be added there without this file growing with them; the continuum-sourcing
+ *  region is similarly abstracted as ContinuumSource and its concrete geometries (SphericalContinuumSource),
+ *  split out into continuum_source.h for the same reason; the line itself is LineTransition (rest energy +
+ *  local Doppler width + opacity normalisation); the observer-frame spectral bins are SpectrumGrid.
  *
  *  Proper path length: opacity and emissivity are rest-frame quantities of the material, so the length
  *  entering the optical-depth integral is not the metric's ds (identically zero along a null geodesic,
@@ -44,13 +47,17 @@
 #define RAY_TRANSFER_H_
 
 #include <cmath>
+#include <memory>
 #include <vector>
 
 #include "../include/kerr.h"
+#include "../include/array.h"
 #include "../raytracer/raytracer.h"
 #include "../raytracer/imageplane.h"
 #include "../raytracer/mino_stepper.h"
 #include "../raytracer/ray_destination.h"
+#include "rtfield.h"
+#include "continuum_source.h"
 
 // -----------------------------------------------------------------------------------------------
 // Line transition: rest energy, local (thermal + turbulent) Doppler width, and opacity normalisation.
@@ -87,174 +94,6 @@ struct SpectrumGrid
         return g;
     }
 };
-
-// -----------------------------------------------------------------------------------------------
-// RTField: the emitting/absorbing material -- 4-velocity and density at a point.  Deliberately not a
-// subclass of RayDestination<T> (ray_destination.h), which describes a stopping *surface*; this
-// describes a volume.
-//
-//   four_velocity()      contravariant Boyer-Lindquist 4-velocity et[4] = (u^t,u^r,u^theta,u^phi),
-//                         g_mn et^m et^n = +1, for the Kerr ray-path backend (RayTransfer).
-//   flat_four_velocity() contravariant Minkowski 4-velocity et[4] = (u^t,u^x,u^y,u^z) at Cartesian
-//                         position (x,y,z), for the flat ray-path backend (FlatRayTransfer).  This is a
-//                         genuinely different construction from four_velocity() at spin = 0 (Schwarzschild,
-//                         not flat -- see the file header), not a redundant special case, even though both
-//                         describe the same underlying physical velocity law.
-//   density()            local particle density (or an equivalent opacity-scale quantity).
-//   in_wind()             false where the field has no material (e.g. inside the stellar photosphere).
-// -----------------------------------------------------------------------------------------------
-template <typename T>
-class RTField
-{
-public:
-    virtual ~RTField() = default;
-    virtual void four_velocity(T r, T theta, T phi, T spin, T et[4]) const = 0;
-    virtual void flat_four_velocity(T x, T y, T z, T et[4]) const = 0;
-    virtual T density(T r, T theta, T phi) const = 0;
-    virtual bool in_wind(T r, T theta, T phi) const { return true; }
-};
-
-// -----------------------------------------------------------------------------------------------
-// SphericalBetaWind: classic beta-velocity-law spherical wind, v(r) = v0 + (v_inf - v0) * (1 - R0/r)^beta,
-// launched from a photosphere of radius R0 (also the inner edge of the wind) out to an outer radius
-// R_out (pass a large value for an effectively unbounded wind, as the P-Cygni test case does); density
-// from mass continuity, n(r) v(r) r^2 = const, normalised so that density(2*R0) == n0.
-//
-// v0 (> 0, required) is the wind's base velocity at r = R0 -- e.g. a thermal/turbulent speed -- and must
-// not be zero: density ~ 1/v(r), and for beta = 1 the column density picked up while v(r) is anywhere
-// near v0 is a *logarithmically divergent* integral (its value is independent of how small a numerical
-// floor on v(r) is set to, so no amount of floor-tuning avoids it -- confirmed empirically: tightening a
-// floor made a spurious spectral spike worse, not better; see docs/plan_ray_transfer.md). Earlier versions
-// of this class floored (1 - R0/r) directly instead of giving the wind a real v0, which does not fix this
-// (the floored region is exactly this same divergent shell, just relocated) -- v0 removes the divergence
-// itself, rather than bounding its symptom, since v(r) is then smooth and bounded away from zero
-// everywhere, including at r = R0 exactly.
-// -----------------------------------------------------------------------------------------------
-template <typename T>
-class SphericalBetaWind : public RTField<T>
-{
-public:
-    T v_inf;      // terminal velocity (units of c)
-    T v0;         // base velocity at r = R0 (units of c); must be > 0
-    T beta_exp;   // velocity-law exponent
-    T R0;         // wind base / photosphere radius
-    T R_out;      // outer wind radius
-    T n0;         // density normalisation: density(2*R0) == n0
-
-    SphericalBetaWind(T v_inf, T v0, T beta_exp, T R0, T R_out, T n0);
-
-    T velocity(T r) const;
-    T density(T r, T theta, T phi) const override;
-    bool in_wind(T r, T theta, T phi) const override { return r > R0 && r < R_out; }
-    void four_velocity(T r, T theta, T phi, T spin, T et[4]) const override;
-    void flat_four_velocity(T x, T y, T z, T et[4]) const override;
-};
-
-// DiscLaunched: wind fills theta_lim < theta < pi - theta_lim (hollow near both poles, symmetric about
-//               the equator) -- launched close to the disc surface, absent near the polar axis.
-// PolarCollimated: wind fills theta < theta_lim || theta > pi - theta_lim (filled cones at both poles,
-//               symmetric about the equator) -- collimated along the polar axis, absent near the equator.
-// theta_lim is measured from the pole (theta = 0), matching Boyer-Lindquist convention (theta = pi/2 is
-// the equatorial plane) used throughout kerr.h/raytracer.h; must be in (0, pi/2).
-enum class WindLatitudeMode { DiscLaunched, PolarCollimated };
-
-// -----------------------------------------------------------------------------------------------
-// ConicalBetaWind: SphericalBetaWind's beta-velocity-law/density profile (delegated to an internal
-// SphericalBetaWind, unchanged -- the radial kinematics/density here do not depend on theta at all, only
-// whether a given theta is included), restricted to a range of polar angle theta (WindLatitudeMode
-// above) rather than filling the whole sphere. Composition over inheritance/duplication: this is exactly
-// SphericalBetaWind's physics with one extra gate in in_wind(), not a different velocity/density law.
-// -----------------------------------------------------------------------------------------------
-template <typename T>
-class ConicalBetaWind : public RTField<T>
-{
-public:
-    SphericalBetaWind<T> radial;
-    T theta_lim;
-    WindLatitudeMode mode;
-
-    ConicalBetaWind(T v_inf, T v0, T beta_exp, T R0, T R_out, T n0, T theta_lim, WindLatitudeMode mode)
-        : radial(v_inf, v0, beta_exp, R0, R_out, n0), theta_lim(theta_lim), mode(mode)
-    {
-    }
-
-    bool in_theta_range(T theta) const
-    {
-        const bool near_pole = (theta < theta_lim) || (theta > M_PI - theta_lim);
-        return (mode == WindLatitudeMode::PolarCollimated) ? near_pole : !near_pole;
-    }
-
-    T density(T r, T theta, T phi) const override { return radial.density(r, theta, phi); }
-    bool in_wind(T r, T theta, T phi) const override
-    {
-        return radial.in_wind(r, theta, phi) && in_theta_range(theta);
-    }
-    void four_velocity(T r, T theta, T phi, T spin, T et[4]) const override
-    {
-        radial.four_velocity(r, theta, phi, spin, et);
-    }
-    void flat_four_velocity(T x, T y, T z, T et[4]) const override
-    {
-        radial.flat_four_velocity(x, y, z, et);
-    }
-};
-
-// -----------------------------------------------------------------------------------------------
-// Corona: the compact, continuum-sourcing region around the black hole.  Parallel in spirit to RTField,
-// but for the continuum source rather than the absorbing/emitting wind volume -- kept as its own
-// interface (rather than reusing RTField or RayDestination) since neither fits: it is not a stopping
-// *surface* (RayDestination) and it has no density/opacity role (RTField), just a geometric extent and an
-// intensity.  "Spherical by default": SphericalCorona is the only geometry implemented, but contains() is
-// virtual so other shapes can be added later without changing RayTransfer.
-//
-//   contains()      true inside the corona.
-//   four_velocity()  the corona's local rest frame, for redshifting its continuum to the observer;
-//                    defaults to the static (non-rotating) observer (same construction
-//                    SphericalBetaWind::four_velocity uses at zero boost) -- override for other motion.
-//   illumination()   the corona's contribution to the wind's line source function at (r,theta,phi): its
-//                     specific intensity, diluted geometrically and redshifted from the corona out to
-//                     that point (I_nu/nu^3 invariance, g^-3 -- same invariant that fixes the corona's own
-//                     continuum boost and the wind's line emission, ray_transfer.cpp). Pure virtual since
-//                     the geometric dilution is shape-specific; SphericalCorona implements it.
-//   intensity        local rest-frame specific intensity, flat (energy-independent).
-// -----------------------------------------------------------------------------------------------
-template <typename T>
-class Corona
-{
-public:
-    T intensity;
-
-    explicit Corona(T intensity) : intensity(intensity) {}
-    virtual ~Corona() = default;
-    virtual bool contains(T r, T theta, T phi) const = 0;
-    virtual void four_velocity(T r, T theta, T phi, T spin, T et[4]) const;
-    virtual T illumination(T r, T theta, T phi, T spin) const = 0;
-};
-
-template <typename T>
-class SphericalCorona : public Corona<T>
-{
-public:
-    T R_corona;
-
-    SphericalCorona(T R_corona, T intensity) : Corona<T>(intensity), R_corona(R_corona) {}
-    bool contains(T r, T theta, T phi) const override { return r <= R_corona; }
-    T illumination(T r, T theta, T phi, T spin) const override;
-};
-
-// -----------------------------------------------------------------------------------------------
-// Geometric dilution factor of an isotropically-emitting spherical photosphere of radius R_star, at
-// radius r (Mihalas 1978): the mean intensity of the illuminating radiation field at r, relative to the
-// specific intensity at the photosphere, under the standard single-scattering approximation (the
-// illuminating beam itself is assumed optically thin -- no self-shielding).
-// -----------------------------------------------------------------------------------------------
-template <typename T>
-inline T dilution_factor(T r, T R_star)
-{
-    if (r <= R_star) return T(0.5);
-    const T x = R_star / r;
-    return T(0.5) * (1 - sqrt(1 - x*x));
-}
 
 // -----------------------------------------------------------------------------------------------
 // Shared per-step accumulation: adds this step's contribution to the absorption (optical depth) and
@@ -327,10 +166,11 @@ private:
 //                how brightly the corona actually illuminates that point; needs re-tuning (density_scale)
 //                if the wind or corona parameters change.
 //   Illumination S = corona->illumination(r,theta,phi,spin) -- the corona's specific intensity, diluted
-//                geometrically and redshifted out to that point (Corona::illumination); physically tied
-//                to the corona's actual brightness, at the cost of assuming its illuminating light
-//                reaches every point along an effectively radial path (see SphericalCorona::illumination,
-//                ray_transfer.cpp, for the exact redshift factor used and what is approximated).
+//                geometrically and redshifted out to that point (ContinuumSource::illumination); physically
+//                tied to the corona's actual brightness, at the cost of assuming its illuminating light
+//                reaches every point along an effectively radial path (see
+//                SphericalContinuumSource::illumination, continuum_source.h, for the exact redshift factor
+//                used and what is approximated).
 // Illumination requires corona != nullptr; falls back to Density (density_scale = 1) if corona is null.
 // -----------------------------------------------------------------------------------------------
 enum class WindSourceMode { Density, Illumination };
@@ -339,26 +179,78 @@ template <typename T>
 class RayTransfer
 {
 public:
-    // r_max <= 0 (default) uses 1.1 * plane.get_dist() (same convention as CausticBundle::Params::from_plane)
-    // -- a fixed default of, say, 1000 would put the escape radius at or inside the image plane itself for
-    // any realistic (larger) observer distance, so rays would "escape" before taking a single step.
-    // max_tstep/max_phistep set the far-field step cap beyond r_cap = 2*horizon (mino_step_size,
-    // mino_stepper.h), same meaning as Raytracer::set_max_tstep(); default to the same library-wide
-    // defaults (MAXDT/MAXDPHI, raytracer.h) Raytracer itself uses when unset.  A wind whose structure
-    // varies on scales smaller than the default far-field step (e.g. a steep density gradient close to
-    // its own launch radius) needs these tightened -- see docs/plan_ray_transfer.md Sec 6.
+    // Nx, Ny, x0, dx, y0, dy define the class's own image-plane pixel grid for run_raytrace() (pixel
+    // centres x0+(ix+0.5)*dx, y0+(iy+0.5)*dy) -- set up here, at construction, exactly as ImagePlane sets
+    // up its own ray grid in its constructor (raytracer/imageplane.cpp), rather than being passed again to
+    // run_raytrace() itself. This is a separate grid from `plane`'s own internal Nx/Ny (ImagePlane keeps
+    // those private, uses a different x0/xmax/dx-derived convention, and raytracer.h/.cpp are not touched
+    // by this library) -- RayTransfer only ever calls plane.init_ray(x, y) at positions of its own choosing.
+    // continuum_map/tau_map/flux_cube/spec_line/spec_total (below) are allocated here too, sized from
+    // Nx/Ny and bins.energy.size().
+    //
+    // The symplectic integrator's own controls (step, order, far-field max_tstep) are not constructor
+    // arguments -- as with Raytracer, they default to the values already in use elsewhere in this library
+    // (order 6, step 1/PRECISION, far-field cap MAXDT/MAXDPHI beyond MAXDT_RLIM) unless overridden by
+    // set_symplectic_step()/set_symplectic_order()/set_max_tstep() below, called before trace_pixel()/
+    // run_raytrace() (see emissivity.cpp for the same pattern on Raytracer).
     RayTransfer(const ImagePlane<T>& plane, T spin, const RTField<T>& field,
                 const LineTransition<T>& line, const SpectrumGrid<T>& bins,
-                const RayDestination<T>* disc = nullptr, const Corona<T>* corona = nullptr,
-                int symp_order = 6, T symp_step = -1, T r_max = -1, int steplim = SYMP_STEPLIM,
-                T max_tstep = MAXDT, T max_phistep = MAXDPHI, T maxtstep_rlim = MAXDT_RLIM,
+                int Nx, int Ny, T x0, T dx, T y0, T dy,
+                const RayDestination<T>* disc = nullptr, const ContinuumSource<T>* corona = nullptr,
                 WindSourceMode source_mode = WindSourceMode::Density, T density_scale = 1);
+
+    // Symplectic integrator controls -- same meaning and defaults as Raytracer::set_symplectic_step()/
+    // set_symplectic_order()/set_max_tstep() (raytracer.h). A wind whose structure varies on scales
+    // smaller than the default far-field step (e.g. a steep density gradient close to its own launch
+    // radius) needs max_tstep tightened -- see docs/plan_ray_transfer.md Sec 6.
+    void set_symplectic_step(T h0) { m_step = h0; }
+    T    get_symplectic_step() const { return m_step; }
+    void set_symplectic_order(int order) { m_order = (order == 2 || order == 4) ? order : 6; }
+    int  get_symplectic_order() const { return m_order; }
+    void set_max_tstep(T max, T rlim = MAXDT_RLIM) { m_max_tstep = max; m_maxtstep_rlim = rlim; }
 
     // Trace the ray landing at image-plane position (x, y).  Returns true iff the ray terminated on the
     // corona (continuum > 0 in that case; 0 otherwise -- blocked by the disc, escaped, stuck at the step
     // limit, or non-finite initial data, e.g. the on-axis image-plane ray).  The observed flux per bin is
     // continuum * exp(-absorption[j]) + line_emission[j].
-    bool trace_pixel(T x, T y, std::vector<T>& line_emission, std::vector<T>& absorption, T& continuum) const;
+    //
+    // r_max/steplim mirror Raytracer::run_raytrace()'s own rlim/steplim, passed through to propagate*()
+    // rather than stored on the class (raytracer.h/.cpp) -- non-positive (the default) resolves r_max to
+    // 1.1 * plane.get_dist() (same convention as CausticBundle::Params::from_plane; a fixed default of,
+    // say, 1000 would put the escape radius at or inside the image plane itself for any realistic (larger)
+    // observer distance, so rays would "escape" before taking a single step) and steplim to SYMP_STEPLIM.
+    bool trace_pixel(T x, T y, std::vector<T>& line_emission, std::vector<T>& absorption, T& continuum,
+                      T r_max = -1, int steplim = -1) const;
+
+    // Traces every pixel of the Nx x Ny grid set up by the constructor, filling continuum_map/tau_map/
+    // flux_cube/spec_line/spec_total/continuum_total/n_corona/tau_corona_max below in place -- the
+    // class-level equivalent of the pixel loop every RayTransfer application previously wrote out for
+    // itself (mirrors Raytracer::run_raytrace, which likewise owns and fills its own `rays` array). Pixels
+    // are independent (trace_pixel is const, touches no shared state), so the row loop is parallelised
+    // internally exactly as it was at the application level. r_max/steplim: see trace_pixel() above --
+    // resolved once here (not once per pixel) and passed through to every trace_pixel() call.
+    void run_raytrace(T r_max = -1, int steplim = -1, int show_progress = 1);
+
+    // Per-pixel/per-bin results, allocated by the constructor and filled by run_raytrace().
+    //   continuum_map, tau_map   [ix][iy]: unabsorbed corona continuum, and peak wind optical depth over
+    //                             the energy grid (max_j absorption[j]) for that line of sight.
+    //   flux_cube                [j][iy][ix] (fits_output.h's write_me_data_cube axis convention):
+    //                             continuum*exp(-absorption) + line_emission per energy bin.
+    //   spec_line, spec_total    [j]: line emission, and total flux, summed over every pixel.
+    //   continuum_total          sum of continuum_map over every pixel.
+    //   n_corona                 number of pixels whose ray terminated on the corona.
+    //   tau_corona_max           peak tau_map restricted to those pixels -- the absorption trough's actual
+    //                            depth against the continuum, as distinct from tau_map's global peak
+    //                            (docs/plan_ray_transfer.md Sec 5.19).
+    std::unique_ptr<Array2D<T>> continuum_map, tau_map;
+    std::unique_ptr<Array3D<T>> flux_cube;
+    std::vector<T> spec_line, spec_total;
+    T continuum_total = 0;
+    T tau_corona_max = 0;
+    long n_corona = 0;
+
+    int get_Nx() const { return m_Nx; }
+    int get_Ny() const { return m_Ny; }
 
 private:
     const ImagePlane<T>& m_plane;
@@ -366,11 +258,12 @@ private:
     const RTField<T>& m_field;
     LineTransition<T> m_line;
     SpectrumGrid<T> m_bins;
+    int m_Nx, m_Ny;
+    T m_x0, m_dx, m_y0, m_dy;
     const RayDestination<T>* m_disc;
-    const Corona<T>* m_corona;
+    const ContinuumSource<T>* m_corona;
     int m_order;
-    T m_step, m_r_max;
-    int m_steplim;
+    T m_step;
     T m_max_tstep, m_max_phistep, m_maxtstep_rlim;
     WindSourceMode m_source_mode;
     T m_density_scale;

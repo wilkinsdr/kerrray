@@ -100,7 +100,7 @@ int main(int argc, char** argv)
     cout << "ISCO at " << r_isco << ", corona radius " << R_corona << endl;
 
     // Wind line-emission source function: "illumination" (default) ties it to the corona's actual
-    // brightness at each point (RTField/Corona::illumination, ray_transfer.h); "density" is a simple,
+    // brightness at each point (ContinuumSource::illumination, continuum_source.h); "density" is a simple,
     // quick placeholder (density_scale * density) with no such tie -- see docs/plan_ray_transfer.md.
     const string source_mode_str = par_file.get_parameter<string>("source_mode", "illumination");
     const WindSourceMode source_mode = (source_mode_str == "density") ? WindSourceMode::Density
@@ -131,81 +131,25 @@ int main(int argc, char** argv)
         cout << "Wind geometry: spherical" << endl;
     }
     RTField<double>& wind = *wind_ptr;
-    SphericalCorona<double> corona(R_corona, I_corona);
+    SphericalContinuumSource<double> corona(R_corona, I_corona);
     DiscWithISCODestination<double> disc(r_isco, r_out_disc);
     LineTransition<double> line{line_energy, doppler_width, kappa0};
     SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(energy_min, energy_max, n_energy);
 
-    RayTransfer<double> rt(plane, spin, wind, line, bins, &disc, &corona, symp_order, symp_step,
-                            -1, SYMP_STEPLIM, max_tstep, MAXDPHI, MAXDT_RLIM, source_mode, density_scale);
+    RayTransfer<double> rt(plane, spin, wind, line, bins, Nx, Ny, x0, dx, y0, dy, &disc, &corona,
+                            source_mode, density_scale);
+    rt.set_symplectic_step(symp_step);
+    rt.set_symplectic_order(symp_order);
+    rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT)
 
-    Array2D<double> continuum_map(Nx, Ny);
-    // Peak optical depth over the energy grid, per line of sight (max_j absorption[j]) -- the standard
-    // "how thick is this sightline" diagnostic: since absorption[j] is accumulated over the *whole*
-    // backward-traced ray (near side, periapsis, far side alike, ray_transfer.cpp:252-253) and never
-    // reset, this is genuinely the total wind optical depth along that line of sight, not just a
-    // per-step or per-leg value. Written out as its own FITS map/summary so the thick-vs-thin regime
-    // for a given parameter choice can be read off directly from a real run, rather than needing a
-    // one-off diagnostic script each time (docs/plan_ray_transfer.md Sec 5.15-5.16).
-    Array2D<double> tau_map(Nx, Ny);
-    // write_me_data_cube expects each frame indexed as data[i][j][k] with j < Ny, k < Nx (fits_output.h) --
-    // the opposite axis order from write_image's data[x][y] used for continuum_map above
-    Array3D<double> flux_cube(n_energy, Ny, Nx);
-
-    long n_corona = 0;
-    double continuum_total = 0;
-    double tau_corona_max = 0;   // peak tau restricted to sightlines that actually reach the corona --
-                                  // the depth of the absorption trough seen against the continuum, as
-                                  // distinct from tau_map's global peak (which includes wind-only
-                                  // sightlines that never reach the corona at all)
-    vector<double> spec_line(n_energy, 0.0), spec_total(n_energy, 0.0);
-
-    // Pixels are independent (RayTransfer::trace_pixel is const and touches no shared mutable state), so
-    // the row loop parallelises directly -- each thread gets its own line_emission/absorption scratch
-    // vectors and a private per-row partial spectrum, merged into the shared spec_line/spec_total under a
-    // critical section once per row (cheap next to the tracing itself). continuum_map/flux_cube are
-    // written at disjoint (ix, iy) indices per row, so no synchronisation is needed for those.
-    #pragma omp parallel for schedule(dynamic) reduction(+:n_corona) reduction(+:continuum_total) \
-        reduction(max:tau_corona_max)
-    for (int ix = 0; ix < Nx; ix++)
-    {
-        vector<double> line_emission(n_energy), absorption(n_energy);
-        vector<double> row_spec_line(n_energy, 0.0), row_spec_total(n_energy, 0.0);
-
-        const double x = x0 + (ix + 0.5) * dx;
-        for (int iy = 0; iy < Ny; iy++)
-        {
-            const double y = y0 + (iy + 0.5) * dy;
-            double continuum;
-            const bool hit_corona = rt.trace_pixel(x, y, line_emission, absorption, continuum);
-            if (hit_corona) ++n_corona;
-
-            continuum_map[ix][iy] = continuum;
-            continuum_total += continuum;
-            double tau_peak = 0;
-            for (int j = 0; j < n_energy; j++)
-            {
-                const double flux = continuum * exp(-absorption[j]) + line_emission[j];
-                flux_cube[j][iy][ix] = flux;
-                row_spec_line[j] += line_emission[j];
-                row_spec_total[j] += flux;
-                if (absorption[j] > tau_peak) tau_peak = absorption[j];
-            }
-            tau_map[ix][iy] = tau_peak;
-            if (hit_corona && tau_peak > tau_corona_max) tau_corona_max = tau_peak;
-        }
-
-        #pragma omp critical
-        {
-            for (int j = 0; j < n_energy; j++)
-            {
-                spec_line[j] += row_spec_line[j];
-                spec_total[j] += row_spec_total[j];
-            }
-            if (ix % max(1, Nx / 20) == 0) cout << "row " << ix << "/" << Nx << endl;
-        }
-    }
-    cout << n_corona << " / " << (Nx * Ny) << " pixels hit the corona" << endl;
+    // Traces every pixel and fills rt.continuum_map/tau_map/flux_cube/spec_line/spec_total/
+    // continuum_total/n_corona/tau_corona_max in place (RayTransfer::run_raytrace, ray_transfer.h/.cpp) --
+    // tau_map is the standard "how thick is this sightline" diagnostic: since absorption[j] is
+    // accumulated over the *whole* backward-traced ray (near side, periapsis, far side alike,
+    // ray_transfer.cpp) and never reset, tau_map[ix][iy] is genuinely the total wind optical depth along
+    // that line of sight, not just a per-step or per-leg value (docs/plan_ray_transfer.md Sec 5.15-5.16).
+    rt.run_raytrace();
+    cout << rt.n_corona << " / " << (Nx * Ny) << " pixels hit the corona" << endl;
 
     // Optically-thick-vs-thin summary: tau_map's peak, mean, and the fraction of sightlines with
     // tau_peak > 1 (the standard optically-thick threshold) -- a quick read on the regime for this
@@ -216,7 +160,7 @@ int main(int argc, char** argv)
         for (int ix = 0; ix < Nx; ix++)
             for (int iy = 0; iy < Ny; iy++)
             {
-                const double t = tau_map[ix][iy];
+                const double t = (*rt.tau_map)[ix][iy];
                 tau_sum += t;
                 if (t > tau_max) tau_max = t;
                 if (t > 1) ++n_thick;
@@ -225,7 +169,7 @@ int main(int argc, char** argv)
         cout << "Wind optical depth: peak tau = " << tau_max << ", mean tau = " << (tau_sum / n_pix)
              << ", " << n_thick << " / " << n_pix << " sightlines optically thick (tau > 1)" << endl;
         cout << "Peak optical depth to the corona (absorption trough depth against the continuum): "
-             << tau_corona_max << endl;
+             << rt.tau_corona_max << endl;
     }
 
     // Image-plane-integrated spectrum, normalised to the (energy-independent) unabsorbed continuum level
@@ -233,8 +177,8 @@ int main(int argc, char** argv)
     ofstream spec_csv(spec_filename);
     spec_csv << "energy,line_flux,total_flux,residual" << endl;
     for (int j = 0; j < n_energy; j++)
-        spec_csv << scientific << setprecision(8) << bins.energy[j] << ',' << spec_line[j] << ','
-                 << spec_total[j] << ',' << (continuum_total > 0 ? spec_total[j] / continuum_total : 0) << endl;
+        spec_csv << scientific << setprecision(8) << bins.energy[j] << ',' << rt.spec_line[j] << ','
+                 << rt.spec_total[j] << ',' << (rt.continuum_total > 0 ? rt.spec_total[j] / rt.continuum_total : 0) << endl;
     spec_csv.close();
     cout << "Wrote " << spec_filename << endl;
 
@@ -252,17 +196,17 @@ int main(int argc, char** argv)
     fits.write_keyword("ROUT", "Wind outer radius", R_out);
     fits.write_keyword("VINF", "Wind terminal velocity (c)", v_inf);
     fits.write_keyword("LINEEN", "Line rest energy", line_energy);
-    fits.write_keyword("NCORONA", "Pixels that hit the corona", n_corona);
+    fits.write_keyword("NCORONA", "Pixels that hit the corona", rt.n_corona);
 
-    fits.write_image(continuum_map, Nx, Ny, false);
+    fits.write_image(*rt.continuum_map, Nx, Ny, false);
     fits.set_ext_name("CONTINUUM");
     fits.write_comment("Unabsorbed corona continuum (0 where the ray did not reach the corona)");
 
-    fits.write_image(tau_map, Nx, Ny, false);
+    fits.write_image(*rt.tau_map, Nx, Ny, false);
     fits.set_ext_name("TAU");
     fits.write_comment("Peak wind optical depth over the energy grid, per line of sight (max_j absorption[j])");
 
-    fits.write_me_data_cube(flux_cube.ptr, n_energy, Nx, Ny);
+    fits.write_me_data_cube(rt.flux_cube->ptr, n_energy, Nx, Ny);
     fits.set_ext_name("FLUX");
     fits.write_comment("continuum*exp(-absorption) + line_emission per energy bin");
     fits.write_keyword("EMIN", "Minimum energy", energy_min);

@@ -6,111 +6,7 @@
 
 #include "ray_transfer.h"
 #include <algorithm>
-
-// =================================================================================================
-// SphericalBetaWind
-// =================================================================================================
-
-template <typename T>
-SphericalBetaWind<T>::SphericalBetaWind(T v_inf_, T v0_, T beta_exp_, T R0_, T R_out_, T n0_)
-    : v_inf(v_inf_), v0(v0_), beta_exp(beta_exp_), R0(R0_), R_out(R_out_), n0(n0_)
-{
-}
-
-template <typename T>
-T SphericalBetaWind<T>::velocity(T r) const
-{
-    if (r <= R0) return v0;
-    return v0 + (v_inf - v0) * pow(1 - R0/r, beta_exp);
-}
-
-template <typename T>
-T SphericalBetaWind<T>::density(T r, T theta, T phi) const
-{
-    if (r <= R0 || r >= R_out) return 0;
-    const T v = velocity(r);
-    if (v <= 0) return 0;   // v0 == 0 (and hence v(r) == 0 everywhere): no wind material at all
-    // mass continuity n(r) v(r) r^2 = const, normalised at r_ref = 2*R0
-    const T r_ref = 2*R0;
-    const T v_ref = velocity(r_ref);
-    return n0 * (v_ref * r_ref*r_ref) / (v * r*r);
-}
-
-template <typename T>
-void SphericalBetaWind<T>::four_velocity(T r, T theta, T phi, T spin, T et[4]) const
-{
-    // static (V = 0) Kerr tetrad, boosted radially by the wind speed at r (kerr.h: kerr_metric, tetrad)
-    const T beta = velocity(r);
-    const T gamma = 1 / sqrt(1 - beta*beta);
-    T pos[4] = {0, r, theta, phi};
-    T g[4][4], etv[4], e1[4], e2[4], e3[4];
-    kerr_metric<T>(g, pos, spin);
-    tetrad<T>(etv, e1, e2, e3, pos, T(0), spin);
-    for (int mu = 0; mu < 4; mu++)
-        et[mu] = gamma*etv[mu] + gamma*beta*e3[mu];
-}
-
-template <typename T>
-void SphericalBetaWind<T>::flat_four_velocity(T x, T y, T z, T et[4]) const
-{
-    const T r = sqrt(x*x + y*y + z*z);
-    const T beta = velocity(r);
-    const T gamma = 1 / sqrt(1 - beta*beta);
-    et[0] = gamma;
-    if (r > 0)
-    {
-        et[1] = gamma*beta*x/r;
-        et[2] = gamma*beta*y/r;
-        et[3] = gamma*beta*z/r;
-    }
-    else
-    {
-        et[1] = et[2] = et[3] = 0;
-    }
-}
-
-// =================================================================================================
-// Corona
-// =================================================================================================
-
-template <typename T>
-void Corona<T>::four_velocity(T r, T theta, T phi, T spin, T et[4]) const
-{
-    // static (V = 0) observer -- same tetrad construction SphericalBetaWind::four_velocity uses at zero
-    // boost, kept unboosted here (non-rotating corona, per docs/plan_ray_transfer.md)
-    T pos[4] = {0, r, theta, phi};
-    T e1[4], e2[4], e3[4];
-    tetrad<T>(et, e1, e2, e3, pos, T(0), spin);
-}
-
-template <typename T>
-T SphericalCorona<T>::illumination(T r, T theta, T phi, T spin) const
-{
-    // Geometric dilution: the same solid-angle formula FlatRayTransfer's star uses (dilution_factor,
-    // above), treating the corona as an isotropically-emitting sphere.
-    //
-    // Redshift from the corona's radius out to this point: for a static (V = 0) observer, the locally
-    // measured energy of a photon with conserved energy-at-infinity k is E = k/sqrt(g00) exactly, for
-    // *any* Kerr spin and *any* connecting null geodesic -- g00*p^t + g03*p^phi = k identically for any
-    // Kerr geodesic (k is this codebase's p_t, and p_t = g_{0 nu} p^nu trivially; verified directly
-    // against momentum_from_consts + kerr_metric, not just derived -- docs/plan_ray_transfer.md Sec 5.11),
-    // so this is independent of the photon's own h/Q and does not depend on which specific (generally
-    // bent) path an illuminating photon takes between the two radii; it is the same static-to-static
-    // Killing-energy argument the corona's own continuum boost and the Schwarzschild-redshift test
-    // already rely on. Evaluating the corona and the point at the *same* theta is the one approximation
-    // here (a radial illuminating path) -- the dilution factor above is the bigger one: unlike this
-    // redshift ratio, it is *not* protected by the Killing-energy cancellation (solid angle depends on
-    // how a bundle of geodesics spreads, which curvature/lensing does change), so it can miss lensing
-    // magnification, additional bent-light images, and self-occultation -- see Sec 5.11 for why fixing
-    // that would need a real ray trace from every wind point, not just two metric evaluations.
-    T pos_corona[4] = {0, R_corona, theta, phi};
-    T pos_point[4] = {0, r, theta, phi};
-    T g_corona[4][4], g_point[4][4];
-    kerr_metric<T>(g_corona, pos_corona, spin);
-    kerr_metric<T>(g_point, pos_point, spin);
-    const T g_illum = sqrt(g_point[0][0] / g_corona[0][0]);   // E_static(corona) / E_static(point)
-    return this->intensity * dilution_factor<T>(r, R_corona) / (g_illum * g_illum * g_illum);
-}
+#include <iostream>
 
 // =================================================================================================
 // accumulate_step
@@ -231,27 +127,38 @@ static T bisect_boundary(const MinoState<T>& q_prev, T step, T a, T k, T h, int 
 template <typename T>
 RayTransfer<T>::RayTransfer(const ImagePlane<T>& plane, T spin, const RTField<T>& field,
                               const LineTransition<T>& line, const SpectrumGrid<T>& bins,
-                              const RayDestination<T>* disc, const Corona<T>* corona,
-                              int symp_order, T symp_step, T r_max, int steplim,
-                              T max_tstep, T max_phistep, T maxtstep_rlim,
+                              int Nx, int Ny, T x0, T dx, T y0, T dy,
+                              const RayDestination<T>* disc, const ContinuumSource<T>* corona,
                               WindSourceMode source_mode, T density_scale)
     : m_plane(plane), m_spin(spin), m_field(field), m_line(line), m_bins(bins),
+      m_Nx(Nx), m_Ny(Ny), m_x0(x0), m_dx(dx), m_y0(y0), m_dy(dy),
       m_disc(disc), m_corona(corona),
-      m_order((symp_order == 2 || symp_order == 4) ? symp_order : 6),
-      m_step(symp_step), m_r_max((r_max > 0) ? r_max : T(1.1) * plane.get_dist()), m_steplim(steplim),
-      m_max_tstep(max_tstep), m_max_phistep(max_phistep), m_maxtstep_rlim(maxtstep_rlim),
+      m_order(6), m_step(-1),
+      m_max_tstep(MAXDT), m_max_phistep(MAXDPHI), m_maxtstep_rlim(MAXDT_RLIM),
       m_source_mode((corona != nullptr) ? source_mode : WindSourceMode::Density),
       m_density_scale(density_scale)
 {
+    const int n_energy = (int)m_bins.energy.size();
+    continuum_map = std::make_unique<Array2D<T>>(m_Nx, m_Ny);
+    tau_map = std::make_unique<Array2D<T>>(m_Nx, m_Ny);
+    flux_cube = std::make_unique<Array3D<T>>(n_energy, m_Ny, m_Nx);
+    spec_line.assign(n_energy, T(0));
+    spec_total.assign(n_energy, T(0));
 }
 
 template <typename T>
-bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::vector<T>& absorption, T& continuum) const
+bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::vector<T>& absorption, T& continuum,
+                                   T r_max, int steplim) const
 {
     const size_t n = m_bins.energy.size();
     line_emission.assign(n, T(0));
     absorption.assign(n, T(0));
     continuum = 0;
+
+    // Non-positive (the default) resolves against this plane's own distance -- see the header comment on
+    // trace_pixel() for why a fixed literal default would be unsafe here.
+    const T r_max_eff = (r_max > 0) ? r_max : T(1.1) * m_plane.get_dist();
+    const int steplim_eff = (steplim > 0) ? steplim : SYMP_STEPLIM;
 
     Ray<T> ray;
     m_plane.init_ray(ray, x, y);
@@ -272,9 +179,9 @@ bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::v
     T r, sd;
     mino_r_from_u<T>(q.u, a, r, sd);
 
-    for (int steps = 0; steps < m_steplim; steps++)
+    for (int steps = 0; steps < steplim_eff; steps++)
     {
-        if (r >= m_r_max) return false;   // escaped, no continuum
+        if (r >= r_max_eff) return false;   // escaped, no continuum
 
         T tdot, phidot;
         const T hstep = mino_step_size<T>(r, q.theta, ray.k, ray.h, a, h0, r_cap,
@@ -359,17 +266,90 @@ bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::v
     return false;   // step limit
 }
 
+template <typename T>
+void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
+{
+    const int n_energy = (int)m_bins.energy.size();
+    const int Nx = m_Nx, Ny = m_Ny;
+    const T x0 = m_x0, dx = m_dx, y0 = m_y0, dy = m_dy;
+
+    // Resolved once here (not once per pixel) -- see trace_pixel()'s header comment for the non-positive
+    // ("use the default") convention.
+    const T r_max_eff = (r_max > 0) ? r_max : T(1.1) * m_plane.get_dist();
+    const int steplim_eff = (steplim > 0) ? steplim : SYMP_STEPLIM;
+
+    std::fill(spec_line.begin(), spec_line.end(), T(0));
+    std::fill(spec_total.begin(), spec_total.end(), T(0));
+    continuum_total = 0;
+    tau_corona_max = 0;
+    n_corona = 0;
+
+    Array2D<T>& cmap = *continuum_map;
+    Array2D<T>& tmap = *tau_map;
+    Array3D<T>& fcube = *flux_cube;
+
+    long n_corona_local = 0;
+    T continuum_total_local = 0;
+    T tau_corona_max_local = 0;
+
+    // Pixels are independent (trace_pixel is const and touches no shared mutable state), so the row loop
+    // parallelises directly -- each thread gets its own line_emission/absorption scratch vectors and a
+    // private per-row partial spectrum, merged into the shared spec_line/spec_total under a critical
+    // section once per row (cheap next to the tracing itself). continuum_map/flux_cube are written at
+    // disjoint (ix, iy) indices per row, so no synchronisation is needed for those.
+    #pragma omp parallel for schedule(dynamic) reduction(+:n_corona_local) reduction(+:continuum_total_local) \
+        reduction(max:tau_corona_max_local)
+    for (int ix = 0; ix < Nx; ix++)
+    {
+        std::vector<T> line_emission(n_energy), absorption(n_energy);
+        std::vector<T> row_spec_line(n_energy, T(0)), row_spec_total(n_energy, T(0));
+
+        const T x = x0 + (ix + T(0.5)) * dx;
+        for (int iy = 0; iy < Ny; iy++)
+        {
+            const T y = y0 + (iy + T(0.5)) * dy;
+            T continuum;
+            const bool hit_corona = trace_pixel(x, y, line_emission, absorption, continuum, r_max_eff, steplim_eff);
+            if (hit_corona) ++n_corona_local;
+
+            cmap[ix][iy] = continuum;
+            continuum_total_local += continuum;
+            T tau_peak = 0;
+            for (int j = 0; j < n_energy; j++)
+            {
+                const T flux = continuum * exp(-absorption[j]) + line_emission[j];
+                fcube[j][iy][ix] = flux;
+                row_spec_line[j] += line_emission[j];
+                row_spec_total[j] += flux;
+                if (absorption[j] > tau_peak) tau_peak = absorption[j];
+            }
+            tmap[ix][iy] = tau_peak;
+            if (hit_corona && tau_peak > tau_corona_max_local) tau_corona_max_local = tau_peak;
+        }
+
+        #pragma omp critical
+        {
+            for (int j = 0; j < n_energy; j++)
+            {
+                spec_line[j] += row_spec_line[j];
+                spec_total[j] += row_spec_total[j];
+            }
+            if (show_progress && ix % std::max(1, Nx / 20) == 0)
+                std::cout << "row " << ix << "/" << Nx << std::endl;
+        }
+    }
+
+    n_corona = n_corona_local;
+    continuum_total = continuum_total_local;
+    tau_corona_max = tau_corona_max_local;
+}
+
 // =================================================================================================
 // explicit instantiation
 // =================================================================================================
 
 template struct LineTransition<double>;
 template struct SpectrumGrid<double>;
-template class RTField<double>;
-template class SphericalBetaWind<double>;
-template class ConicalBetaWind<double>;
-template class Corona<double>;
-template class SphericalCorona<double>;
 template void accumulate_step<double>(double, double, double, double, const LineTransition<double>&,
                                        const SpectrumGrid<double>&, std::vector<double>&, std::vector<double>&);
 template class FlatRayTransfer<double>;

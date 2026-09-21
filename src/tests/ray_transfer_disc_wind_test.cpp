@@ -10,7 +10,7 @@
 //       angular momentum h (momentum_from_consts, kerr.h, collapses to this at a = 0), so the blueshift
 //       of a photon falling from the image plane (effectively r = infinity) to a static corona at radius
 //       r is g = E_loc/E_obs = 1/sqrt(1 - 2/r), independent of which pixel/direction the ray arrived from.
-//       This checks Corona::four_velocity + the ray_redshift reuse in RayTransfer::trace_pixel against
+//       This checks ContinuumSource::four_velocity + the ray_redshift reuse in RayTransfer::trace_pixel against
 //       that closed-form result, via continuum = I_corona / g^3 (the I_nu/nu^3 invariant specific-intensity
 //       boost -- ray_transfer.cpp; g > 1 here, so the corona comes out dimmer than I_corona, as it must
 //       for redshifted light).
@@ -54,10 +54,12 @@ int main()
         // wind's density model), but kept at the same values used everywhere else the wind is actually
         // on (v0_vinf = 0.05, kappa0 = 0.2 -- see docs/plan_ray_transfer.md Sec 5.4-5.6) for consistency.
         SphericalBetaWind<double> wind(0.01, 0.05*0.01, 1.0, 6.0, 100.0, 0.0);
-        SphericalCorona<double> corona(R_corona, I_corona);
+        SphericalContinuumSource<double> corona(R_corona, I_corona);
         LineTransition<double> line{1.0, 0.01, 0.2};
         SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(0.9, 1.1, 3);
-        RayTransfer<double> rt(plane, spin, wind, line, bins, nullptr, &corona);
+        // Nx/Ny/x0/dx/y0/dy: this test drives trace_pixel() directly on its own x/y loop below, not
+        // run_raytrace()'s grid, so these are unused placeholders.
+        RayTransfer<double> rt(plane, spin, wind, line, bins, 1, 1, 0.0, 1.0, 0.0, 1.0, nullptr, &corona);
 
         int n_hit = 0;
         double max_dev = 0;
@@ -89,11 +91,12 @@ int main()
         // v0/kappa0 are inert here too (n0 = 0: isolate disc blocking from the wind's density model), same
         // consistency note as above.
         SphericalBetaWind<double> wind(0.01, 0.05*0.01, 1.0, r_isco, 100.0, 0.0);
-        SphericalCorona<double> corona(R_corona, 1.0);
+        SphericalContinuumSource<double> corona(R_corona, 1.0);
         DiscWithISCODestination<double> disc(r_isco, r_out_disc);
         LineTransition<double> line{1.0, 0.01, 0.2};
         SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(0.9, 1.1, 3);
-        RayTransfer<double> rt(plane, spin, wind, line, bins, &disc, &corona);
+        // Nx/Ny/x0/dx/y0/dy: unused placeholders, as above -- this test also drives trace_pixel() directly.
+        RayTransfer<double> rt(plane, spin, wind, line, bins, 1, 1, 0.0, 1.0, 0.0, 1.0, &disc, &corona);
 
         int n_hit = 0, n_blocked = 0, n_other = 0;
         vector<double> em, ab;
