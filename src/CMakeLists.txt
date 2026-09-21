@@ -25,4 +25,7 @@ add_subdirectory (caustic)
 include_directories("reverb")
 add_subdirectory (reverb)
 
+include_directories("ray_transfer")
+add_subdirectory (ray_transfer)
+
 add_subdirectory (tests)

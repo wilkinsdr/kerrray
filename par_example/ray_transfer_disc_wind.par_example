@@ -1,0 +1,61 @@
+outfile = ../dat/ray_transfer_disc_wind.fits
+
+# image plane (as in imageplane_disc_image.par)
+dist = 1000
+incl = 60
+spin = 0.9
+plane_phi0 = 0
+x0 = -20
+xmax = 20
+Nx = 100
+y0 = -20
+ymax = 20
+Ny = 100
+symp_step = -1
+symp_order = 6
+# far-field step cap: default (0.01) is refined enough to avoid aliasing the wind's density gradient near
+# R0 into a spurious spike (see docs/plan_ray_transfer.md Sec 6); tighten further (more compute) to check
+# convergence, or loosen for a quick/coarse look.
+max_tstep = 0.01
+
+# spherical wind, inner/outer radius (units of Rg).  v0_vinf = 0.05, kappa0 = 0.2 below (not the original
+# 0.01 / 2.0): that combination made every corona-hitting ray pile up a large, genuine (converged, not a
+# resolution artifact) optical depth/emission contribution right at the wind's launch shell -- with
+# spin != 0 breaking the spherical symmetry that ray_transfer_kerr_vs_flat's spin = 0 case has, this
+# doesn't show up as one obvious spike (each pixel's ray has a slightly different redshift, so the
+# contributions smear across several energy bins instead of stacking into one) but it was still there,
+# dominating the whole spectrum -- see docs/plan_ray_transfer.md Sec 5.5.
+v_inf = 0.05
+v0_vinf = 0.05
+beta = 1.0
+R0 = 5.0
+R_out = 100.0
+n0 = 1.0
+
+# spherical corona around the black hole (must sit inside R0)
+R_corona = 3.0
+I_corona = 1.0
+
+# wind line-emission source function: "illumination" (recommended) ties it to the corona's actual
+# brightness at each point (RTField/Corona::illumination, ray_transfer.h) -- physically motivated, no
+# extra parameter needed. "density" is a simple, quick placeholder (density_scale * density) with no such
+# tie -- density_scale is a free knob you'd need to re-tune if the wind/corona parameters change; only
+# read when source_mode = density. See docs/plan_ray_transfer.md Sec 5.10 for why this matters: with the
+# corona correctly dimmed near the black hole (Sec 5.9), an uncalibrated density-based source can swamp
+# the P-Cygni-style absorption trough with unrelated emission.
+source_mode = illumination
+density_scale = 1.0
+
+# accretion disc: inner edge is the ISCO, outer edge set here
+r_out_disc = 50.0
+
+# resonance line (e.g. Fe K-alpha, keV)
+line_energy = 6.4
+doppler_width = 0.05
+kappa0 = 0.2
+
+# output energy grid (wide enough to catch the strongly redshifted feature from the slow-moving wind
+# base near R0, not just the line's rest energy)
+n_energy = 90
+energy_min = 3.0
+energy_max = 7.5

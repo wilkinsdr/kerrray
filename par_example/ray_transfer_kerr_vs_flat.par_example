@@ -1,0 +1,62 @@
+outfile = ../dat/ray_transfer_kerr_vs_flat.csv
+
+# spherical wind, inner/outer radius (units of Rg / same units on both sides of the comparison).
+# v0_vinf sets the wind's base velocity at R0 as a fraction of v_inf -- must be > 0 (a real physical
+# launch speed, e.g. thermal/turbulent), not just numerically small: for beta = 1, the column density
+# picked up while v(r) is near v0 grows only logarithmically as v0 -> 0 (confirmed empirically: doubling
+# v0_vinf roughly halves that contribution, not more), so this is a genuine modeling choice, not a
+# resolution setting -- see docs/plan_ray_transfer.md and SphericalBetaWind (ray_transfer.h).
+v_inf = 0.05
+v0_vinf = 0.05
+beta = 1.0
+R0 = 5.0
+R_out = 100.0
+n0 = 1.0
+
+# spherical corona / star (must sit inside R0)
+R_corona = 3.0
+I_corona = 1.0
+
+# Kerr-side wind line-emission source function -- matched to ray_transfer_disc_wind.par_example, same
+# reason as everything else here (Sec 5.7-5.10). The flat side has no equivalent switch: it always uses
+# the illumination-based I_star*dilution_factor(r,R_star) (FlatRayTransfer::trace_ray).
+source_mode = illumination
+density_scale = 1.0
+
+# resonance line.  kappa0 is deliberately modest here (vs. e.g. ray_transfer_disc_wind.par's 2.0):
+# with R0 this close to the black hole, the wind's slow-moving, dense base still produces a strong,
+# genuinely converged (not a numerical artifact -- verified by tightening max_tstep with no change)
+# spectral feature; kappa0 = 2.0 saturates that feature to the point of dominating the whole spectrum,
+# which is fine for a single application's own spectrum but obscures the flat-vs-Kerr comparison this
+# is for.
+line_energy = 6.4
+doppler_width = 0.05
+kappa0 = 0.2
+
+# output energy grid (wide enough for the Kerr side's gravitational redshift)
+n_energy = 90
+energy_min = 2.5
+energy_max = 7.0
+
+# Kerr side: spin, incl, dist, image-plane grid, max_tstep and the disc all matched to
+# ray_transfer_disc_wind.par_example so the two applications' RayTransfer calculation is directly, exactly
+# comparable pixel-for-pixel (docs/plan_ray_transfer.md Sec 5.7) -- note this means spin != 0, so the Kerr
+# side now includes frame dragging as well as gravitational redshift, and the disc blocks some rays; it is
+# no longer the clean, gravity-only isolation the spin = 0 / no-disc configuration gave (that comparison is
+# preserved in docs/plan_ray_transfer.md Sec 5.3 for reference; set r_out_disc <= 0 and spin = 0 to
+# recover it). Nx/x0/xmax matter for more than image quality here too: the photon-capture cross-section
+# that actually reaches the corona is small against a grid sized to cover the wind's full extent, so a
+# coarse grid can make every corona-hitting ray nearly identical, concentrating what is really a spread of
+# similar (but not exactly equal) redshifts into a single energy bin and making it look like a sharper
+# feature than it is.
+spin = 0.9
+dist = 1000
+incl = 60
+x0 = -20
+xmax = 20
+Nx = 60
+max_tstep = 0.01
+r_out_disc = 50.0
+
+# flat side: impact-parameter grid and line-of-sight integration
+n_p = 300

@@ -36,3 +36,9 @@ target_link_libraries(caustic_ent_test imageplane raytracer)
 
 add_executable(caustic_bundle_test caustic_bundle_test.cpp)
 target_link_libraries(caustic_bundle_test imageplane raytracer)
+
+add_executable(ray_transfer_pcygni_test ray_transfer_pcygni_test.cpp)
+target_link_libraries(ray_transfer_pcygni_test ray_transfer)
+
+add_executable(ray_transfer_disc_wind_test ray_transfer_disc_wind_test.cpp)
+target_link_libraries(ray_transfer_disc_wind_test ray_transfer)

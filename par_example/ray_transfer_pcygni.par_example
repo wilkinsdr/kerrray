@@ -1,0 +1,35 @@
+outfile = ../dat/ray_transfer_pcygni.csv
+
+# spherical beta-velocity-law wind, v(r) = v_inf * (1 - R0/r)^beta
+v_inf = 0.01
+v0_vinf = 0.05
+beta = 1.0
+R0 = 1.0
+R_out_R0 = 1.0e6
+n0 = 1.0
+
+# resonance line: rest energy, local (thermal+turbulent) Doppler width, opacity normalisation.
+# kappa0 = 5.0 was the original value here; every ray with p <~ R0 terminates right at r = R0 (the star's
+# surface IS the wind's launch point, by design), so it always crosses the same near-launch density
+# pileup discussed in docs/plan_ray_transfer.md Sec 5.4-5.5 -- with kappa0 = 5.0 the resulting trough is
+# saturated well before kappa0 gets anywhere near that value (checked: the trough depth barely changes
+# from kappa0 = 5.0 down to ~0.1), so the profile shape wasn't actually testing kappa0-sensitive physics.
+# kappa0 = 0.002 sits below that saturation floor -- a real, unsaturated, still clearly P-Cygni-shaped
+# profile.
+line_energy = 1.0
+doppler_width = 0.001
+kappa0 = 0.002
+
+# stellar continuum intensity (photosphere at r = R0)
+I_star = 1.0
+
+# impact-parameter grid (units of R0) and line-of-sight integration range/step (units of R0)
+p_max_R0 = 5.0
+n_p = 200
+z_max_R0 = 20.0
+dz_R0 = 0.02
+
+# output energy grid
+n_energy = 200
+energy_min = 0.96
+energy_max = 1.02
