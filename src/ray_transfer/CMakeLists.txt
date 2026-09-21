@@ -1,5 +1,5 @@
 add_library(ray_transfer ray_transfer.cpp)
-target_link_libraries(ray_transfer imageplane raytracer)
+target_link_libraries(ray_transfer imageplane log_imageplane raytracer)
 
 add_executable(ray_transfer_pcygni ray_transfer_pcygni.cpp)
 target_link_libraries(ray_transfer_pcygni ray_transfer)

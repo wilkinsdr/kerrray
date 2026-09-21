@@ -49,12 +49,10 @@ int main(int argc, char** argv)
     const double spin = (par_args.key_exists("--spin")) ? par_args.get_parameter<double>("--spin")
                                                          : par_file.get_parameter<double>("spin");
     const double plane_phi0 = par_file.get_parameter<double>("plane_phi0", 0);
-    const double x0 = par_file.get_parameter<double>("x0");
-    const double xmax = par_file.get_parameter<double>("xmax");
-    const int Nx = par_file.get_parameter<int>("Nx");
-    const double y0 = par_file.get_parameter<double>("y0", x0);
-    const double ymax = par_file.get_parameter<double>("ymax", xmax);
-    const int Ny = par_file.get_parameter<int>("Ny", Nx);
+    // grid_type: "linear" (default) is ImagePlane's original uniformly-spaced (x0/xmax/Nx/y0/ymax/Ny) grid;
+    // "log" is LogImagePlane's logarithmically-spaced grid (log_x_min/log_x_max/log_Nx/log_Nlinx and the
+    // y-equivalents). See src/raytracer/log_imageplane.h and the RayTransferGrid comment in ray_transfer.h.
+    const string grid_type = par_file.get_parameter<string>("grid_type", "linear");
     const double symp_step = par_file.get_parameter<double>("symp_step", -1);
     const int symp_order = par_file.get_parameter<int>("symp_order", 6);
     const double max_tstep = par_file.get_parameter<double>("max_tstep", 0.01);
@@ -110,10 +108,41 @@ int main(int argc, char** argv)
     const double powerlaw_index = par_file.get_parameter<double>("powerlaw_index", 0.0);
     cout << "Wind source function: " << source_mode_str << endl;
 
-    const double dx = (xmax - x0) / Nx;
-    const double dy = (ymax - y0) / Ny;
+    // Image-plane grid: see ray_transfer_disc_wind.cpp's identical block for the full rationale (in
+    // particular why unique_ptr<own-concrete-type>, never a unique_ptr<ImagePlane<double>>, is required,
+    // and why RayTransfer's two constructor overloads take a plane object rather than a separate grid one).
+    unique_ptr<ImagePlane<double>> linear_plane;
+    unique_ptr<LogImagePlane<double>> log_plane;
+    double x0 = 0, xmax = 0, dx = 0, y0 = 0, dy = 0;
+    int Nx = 0, Ny = 0;
 
-    ImagePlane<double> plane(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
+    if (grid_type == "log")
+    {
+        const double log_x_min = par_file.get_parameter<double>("log_x_min");
+        const double log_x_max = par_file.get_parameter<double>("log_x_max");
+        const int log_Nx = par_file.get_parameter<int>("log_Nx");
+        const int log_Nlinx = par_file.get_parameter<int>("log_Nlinx");
+        const double log_y_min = par_file.get_parameter<double>("log_y_min", log_x_min);
+        const double log_y_max = par_file.get_parameter<double>("log_y_max", log_x_max);
+        const int log_Ny = par_file.get_parameter<int>("log_Ny", log_Nx);
+        const int log_Nliny = par_file.get_parameter<int>("log_Nliny", log_Nlinx);
+
+        log_plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
+                                                         log_y_min, log_y_max, log_Ny, log_Nliny, spin, plane_phi0);
+    }
+    else
+    {
+        x0 = par_file.get_parameter<double>("x0");
+        xmax = par_file.get_parameter<double>("xmax");
+        Nx = par_file.get_parameter<int>("Nx");
+        y0 = par_file.get_parameter<double>("y0", x0);
+        const double ymax = par_file.get_parameter<double>("ymax", xmax);
+        Ny = par_file.get_parameter<int>("Ny", Nx);
+        dx = (xmax - x0) / Nx;
+        dy = (ymax - y0) / Ny;
+
+        linear_plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
+    }
 
     DiscSurface<double> gas(R_in, R_out, z_min, z_max, density_mode, n0, density_index);
     DiscContinuumSource<double> corona(R_in_corona, R_out_corona, I_corona);
@@ -121,12 +150,20 @@ int main(int argc, char** argv)
     LineTransition<double> line{line_energy, doppler_width, kappa0};
     SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(energy_min, energy_max, n_energy);
 
-    RayTransfer<double> rt(plane, spin, gas, line, bins, Nx, Ny, x0, dx, y0, dy, &disc, &corona,
-                            source_mode, density_scale);
+    unique_ptr<RayTransfer<double>> rt_ptr;
+    if (log_plane)
+        rt_ptr = make_unique<RayTransfer<double>>(*log_plane, spin, gas, line, bins, &disc, &corona,
+                                                    source_mode, density_scale);
+    else
+        rt_ptr = make_unique<RayTransfer<double>>(*linear_plane, spin, gas, line, bins, Nx, Ny, x0, dx, y0, dy,
+                                                    &disc, &corona, source_mode, density_scale);
+    RayTransfer<double>& rt = *rt_ptr;
     rt.set_symplectic_step(symp_step);
     rt.set_symplectic_order(symp_order);
     rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT)
     rt.set_powerlaw_source(powerlaw_norm, powerlaw_ref_r, powerlaw_index);
+
+    Nx = rt.get_Nx(); Ny = rt.get_Ny();   // authoritative dimensions regardless of grid_type (see above)
 
     rt.run_raytrace();
     cout << rt.n_corona << " / " << (Nx * Ny) << " pixels hit the disc's emitting annulus" << endl;
@@ -172,6 +209,43 @@ int main(int argc, char** argv)
     fits.write_keyword("RGASOUT", "Gas layer outer cylindrical radius", R_out);
     fits.write_keyword("LINEEN", "Line rest energy", line_energy);
     fits.write_keyword("NCORONA", "Pixels that hit the disc's emitting annulus", rt.n_corona);
+    fits.write_keyword("GRIDTYPE", "Image-plane pixel grid: linear or log", grid_type);
+    if (grid_type == "log")
+    {
+        fits.write_keyword("LOGXMIN", "Log grid inner x edge", par_file.get_parameter<double>("log_x_min"));
+        fits.write_keyword("LOGXMAX", "Log grid outer x edge", par_file.get_parameter<double>("log_x_max"));
+        fits.write_keyword("LOGNX", "Log grid: log-spaced bins per side, x", par_file.get_parameter<int>("log_Nx"));
+        fits.write_keyword("LOGNLINX", "Log grid: linear-zone bins, x", par_file.get_parameter<int>("log_Nlinx"));
+        fits.write_keyword("LOGYMIN", "Log grid inner y edge", par_file.get_parameter<double>("log_y_min", par_file.get_parameter<double>("log_x_min")));
+        fits.write_keyword("LOGYMAX", "Log grid outer y edge", par_file.get_parameter<double>("log_y_max", par_file.get_parameter<double>("log_x_max")));
+        fits.write_keyword("LOGNY", "Log grid: log-spaced bins per side, y", par_file.get_parameter<int>("log_Ny", par_file.get_parameter<int>("log_Nx")));
+        fits.write_keyword("LOGNLINY", "Log grid: linear-zone bins, y", par_file.get_parameter<int>("log_Nliny", par_file.get_parameter<int>("log_Nlinx")));
+    }
+
+    // Self-describing pixel-center coordinates and cell widths, valid for either grid_type -- see
+    // ray_transfer_disc_wind.cpp's identical block for the rationale.
+    {
+        vector<double> xcol(Nx), dxcol(Nx);
+        for (int ix = 0; ix < Nx; ix++) { xcol[ix] = rt.grid_x(ix); dxcol[ix] = rt.grid_dx(ix); }
+        char* ttype[] = {(char*)"X", (char*)"DX"};
+        char* tform[] = {(char*)COL_FLOAT64, (char*)COL_FLOAT64};
+        char* tunit[] = {(char*)"Rg", (char*)"Rg"};
+        fits.create_table("XGRID", 2, Nx, ttype, tform, tunit);
+        fits.write_table_column(xcol.data(), Nx);
+        fits.write_table_column(dxcol.data(), Nx);
+        fits.write_comment("Pixel-center x coordinate and column width for each image-plane column");
+    }
+    {
+        vector<double> ycol(Ny), dycol(Ny);
+        for (int iy = 0; iy < Ny; iy++) { ycol[iy] = rt.grid_y(iy); dycol[iy] = rt.grid_dy(iy); }
+        char* ttype[] = {(char*)"Y", (char*)"DY"};
+        char* tform[] = {(char*)COL_FLOAT64, (char*)COL_FLOAT64};
+        char* tunit[] = {(char*)"Rg", (char*)"Rg"};
+        fits.create_table("YGRID", 2, Ny, ttype, tform, tunit);
+        fits.write_table_column(ycol.data(), Ny);
+        fits.write_table_column(dycol.data(), Ny);
+        fits.write_comment("Pixel-center y coordinate and row width for each image-plane row");
+    }
 
     fits.write_image(*rt.continuum_map, Nx, Ny, false);
     fits.set_ext_name("CONTINUUM");

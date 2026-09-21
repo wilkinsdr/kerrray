@@ -132,17 +132,40 @@ RayTransfer<T>::RayTransfer(const ImagePlane<T>& plane, T spin, const RTField<T>
                               const RayDestination<T>* disc, const ContinuumSource<T>* corona,
                               WindSourceMode source_mode, T density_scale)
     : m_plane(plane), m_spin(spin), m_field(field), m_line(line), m_bins(bins),
-      m_Nx(Nx), m_Ny(Ny), m_x0(x0), m_dx(dx), m_y0(y0), m_dy(dy),
+      m_grid(std::make_unique<LinearRayTransferGrid<T>>(Nx, Ny, x0, dx, y0, dy)),
       m_disc(disc), m_corona(corona),
       m_order(6), m_step(-1),
       m_max_tstep(MAXDT), m_max_phistep(MAXDPHI), m_maxtstep_rlim(MAXDT_RLIM),
       m_source_mode((corona != nullptr) ? source_mode : WindSourceMode::Density),
       m_density_scale(density_scale)
 {
+    init_arrays();
+}
+
+template <typename T>
+RayTransfer<T>::RayTransfer(const LogImagePlane<T>& plane, T spin, const RTField<T>& field,
+                              const LineTransition<T>& line, const SpectrumGrid<T>& bins,
+                              const RayDestination<T>* disc, const ContinuumSource<T>* corona,
+                              WindSourceMode source_mode, T density_scale)
+    : m_plane(plane), m_spin(spin), m_field(field), m_line(line), m_bins(bins),
+      m_grid(std::make_unique<LogRayTransferGrid<T>>(plane)),
+      m_disc(disc), m_corona(corona),
+      m_order(6), m_step(-1),
+      m_max_tstep(MAXDT), m_max_phistep(MAXDPHI), m_maxtstep_rlim(MAXDT_RLIM),
+      m_source_mode((corona != nullptr) ? source_mode : WindSourceMode::Density),
+      m_density_scale(density_scale)
+{
+    init_arrays();
+}
+
+template <typename T>
+void RayTransfer<T>::init_arrays()
+{
     const int n_energy = (int)m_bins.energy.size();
-    continuum_map = std::make_unique<Array2D<T>>(m_Nx, m_Ny);
-    tau_map = std::make_unique<Array2D<T>>(m_Nx, m_Ny);
-    flux_cube = std::make_unique<Array3D<T>>(n_energy, m_Ny, m_Nx);
+    const int Nx = m_grid->Nx(), Ny = m_grid->Ny();
+    continuum_map = std::make_unique<Array2D<T>>(Nx, Ny);
+    tau_map = std::make_unique<Array2D<T>>(Nx, Ny);
+    flux_cube = std::make_unique<Array3D<T>>(n_energy, Ny, Nx);
     spec_line.assign(n_energy, T(0));
     spec_total.assign(n_energy, T(0));
 }
@@ -289,8 +312,7 @@ template <typename T>
 void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
 {
     const int n_energy = (int)m_bins.energy.size();
-    const int Nx = m_Nx, Ny = m_Ny;
-    const T x0 = m_x0, dx = m_dx, y0 = m_y0, dy = m_dy;
+    const int Nx = m_grid->Nx(), Ny = m_grid->Ny();
 
     // Resolved once here (not once per pixel) -- see trace_pixel()'s header comment for the non-positive
     // ("use the default") convention.
@@ -332,23 +354,29 @@ void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
         std::vector<T> line_emission(n_energy), absorption(n_energy);
         std::vector<T> row_spec_line(n_energy, T(0)), row_spec_total(n_energy, T(0));
 
-        const T x = x0 + (ix + T(0.5)) * dx;
+        const T x = m_grid->x(ix);
         for (int iy = 0; iy < Ny; iy++)
         {
-            const T y = y0 + (iy + T(0.5)) * dy;
+            const T y = m_grid->y(iy);
+            const T w = m_grid->weight(ix, iy);
             T continuum;
             const bool hit_corona = trace_pixel(x, y, line_emission, absorption, continuum, r_max_eff, steplim_eff);
             if (hit_corona) ++n_corona_local;
 
+            // continuum_map/tau_map/flux_cube are per-sightline scalars, not area densities -- left
+            // unweighted regardless of grid type. Only the whole-image-plane aggregates below (spec_line/
+            // spec_total/continuum_total) are weighted by pixel area; for LinearRayTransferGrid, w == 1
+            // always, so every weighted line below is an exact no-op multiplication (bit-identical to the
+            // unweighted sums this class used before grid_type existed).
             cmap[ix][iy] = continuum;
-            continuum_total_local += continuum;
+            continuum_total_local += continuum * w;
             T tau_peak = 0;
             for (int j = 0; j < n_energy; j++)
             {
                 const T flux = continuum * exp(-absorption[j]) + line_emission[j];
                 fcube[j][iy][ix] = flux;
-                row_spec_line[j] += line_emission[j];
-                row_spec_total[j] += flux;
+                row_spec_line[j] += line_emission[j] * w;
+                row_spec_total[j] += flux * w;
                 if (absorption[j] > tau_peak) tau_peak = absorption[j];
             }
             tmap[ix][iy] = tau_peak;

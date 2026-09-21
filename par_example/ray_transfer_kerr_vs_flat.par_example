@@ -52,9 +52,22 @@ energy_max = 7.0
 spin = 0.9
 dist = 1000
 incl = 60
+
+# grid_type: "linear" (default, square x0/xmax/Nx below) or "log" (LogImagePlane, square log_x_min/
+# log_x_max/log_Nx/log_Nlinx below) -- see ray_transfer_disc_wind.par_example for the full explanation.
+# Only the selected grid_type's keys are actually read.
+grid_type = linear
+
 x0 = -20
 xmax = 20
 Nx = 60
+
+# log grid (only read when grid_type = log)
+log_x_min = 1.0
+log_x_max = 20.0
+log_Nx = 20
+log_Nlinx = 4
+
 max_tstep = 0.01
 r_out_disc = 50.0
 

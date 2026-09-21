@@ -1378,3 +1378,160 @@ some coarser unit.
 FITS HDUs identical. Ran interactively (multi-threaded, piped through `grep`) to confirm the bar itself
 renders using the expected escape sequences (`\e[?25l`/`\e[?25h` cursor hide/show, `\r` carriage return),
 counting cleanly from 1 to `Nx*Ny` with no duplicate or skipped values despite the parallel row loop.
+
+## 5.33  `grid_type = log`: making `LogImagePlane` an option in `RayTransfer` and its applications
+
+`LogImagePlane` (`src/raytracer/log_imageplane.h/.cpp`) was built separately (a logarithmically-spaced,
+mirrored-per-axis "symlog" `ImagePlane` variant, with a linear zone through the origin so the grid tiles the
+plane with no gap, and a per-ray `ray_weight()` for its non-equal-area pixels). This section wires it into
+`RayTransfer` and its three applications as a `grid_type = linear | log` par-file option, required to remain
+exactly backward compatible with every existing linear-grid run.
+
+**The grid had to become swappable.** `RayTransfer` owns a completely separate uniform pixel grid from
+`plane` (Sec 5.24-5.27) -- it never reads `plane`'s own grid, so passing a `LogImagePlane` as `plane` alone
+would do nothing for `RayTransfer`'s own pixel loop. Introduced `RayTransferGrid<T>` (`ray_transfer.h`), a
+small pure-virtual interface (`Nx()`, `Ny()`, `x(ix)`, `y(iy)`, `dx(ix)`, `dy(iy)`, `weight(ix,iy)`) mirroring
+this codebase's existing small pluggable-interface pattern for "swap in different behaviour" classes
+(`RayDestination`, `ContinuumSource`, `RTField` -- the core `Raytracer`/`ImagePlane` use no virtuals at all,
+but their extension points already do), with two concrete, fully header-only implementations:
+`LinearRayTransferGrid` (RayTransfer's original `x0+(ix+0.5)*dx` formula) and `LogRayTransferGrid` (backed by
+a `LogImagePlane` reference, reusing its `get_Nx()/get_Ny()/ray_x()/ray_y()/ray_weight()`).
+
+**The aggregate sums had to become weighted, without changing any existing number.** `run_raytrace()`'s
+`spec_total`/`spec_line`/`continuum_total` were, and had always been, *unweighted* sums over pixels -- fine
+only because every linear-grid pixel is the same size. `RayTransferGrid::weight()` is deliberately **not**
+`dx(ix)*dy(iy)` for the linear grid -- it is fixed at exactly `1`, preserving that longstanding unweighted
+convention bit-for-bit (redefining it as a true area would have silently rescaled every existing run's
+absolute `spec_total`/`continuum_total`, which the ratio-based `residual` column would hide but the raw CSV
+columns would not). For the log grid, `weight()` genuinely is the pixel's area (`LogImagePlane::ray_weight()`),
+the entire point of adding it. `continuum_map`/`tau_map`/`flux_cube` (per-sightline scalars, not area
+densities) are deliberately left unweighted in both modes -- only the whole-image-plane aggregates are
+weighted. `dx()`/`dy()` (added to `LogImagePlane` too, by column/row index rather than the flat ray index
+`ray_x`/`ray_y`/`ray_weight` take) exist purely for self-describing output, independent of `weight()`.
+
+**A real memory-safety trap, caught before it shipped.** The natural way to pick between an `ImagePlane` or
+`LogImagePlane` at runtime looks like `unique_ptr<ImagePlane<double>>` (upcasting whichever concrete object
+was built) -- but `ImagePlane<T>` has no virtual destructor (by design; `raytracer.h`/`imageplane.h` are
+never touched by this project), so destructing a `LogImagePlane` through that base-typed pointer is
+undefined behaviour: only `~ImagePlane()` runs, silently leaking `LogImagePlane`'s own `std::vector` members.
+The fix used throughout the three applications: a `unique_ptr` of each object's own *concrete* type
+(`unique_ptr<ImagePlane<double>> linear_plane`, separately `unique_ptr<LogImagePlane<double>> log_plane`,
+only one ever allocated), with a non-owning reference used afterwards where the two types converge. (The
+original plan used `std::optional` for the same reason, which is equally safe -- switched to `unique_ptr`
+because this project's CMake build sets no `CMAKE_CXX_STANDARD` and defaults to a pre-C++17 dialect, unlike
+the standalone test-build commands documented elsewhere in this file which explicitly pass `-std=c++17`;
+`unique_ptr`/`make_unique` need only C++14, already used throughout this class.)
+
+**Wired into all three applications**, per an explicit request that `ray_transfer_kerr_vs_flat.cpp` -- which
+doesn't call `run_raytrace()` at all, driving `trace_pixel()` in its own hand-rolled square-grid loop --
+get the option too, not just the two `run_raytrace()`-based applications. Its diagnostic `tau_peak`/
+`kerr_tau_max`/`kerr_tau_sum`/`kerr_n_thick`/`n_corona` accumulators (and the equivalent ones in the other
+two applications) are deliberately left as plain per-pixel-count statistics in both modes -- they answer
+"how many/how thick a typical sightline is," not a physically-integrated quantity. `grid_type` (`"linear"`
+default or `"log"`) plus a `log_x_min/log_x_max/log_Nx/log_Nlinx` (+ y-equivalents, defaulting to the x
+values) par-file block was added to all three `par_example` files; the original `x0/xmax/Nx/y0/ymax/Ny` keys
+are unchanged and only read in the linear branch. `FlatRayTransfer`'s impact-parameter grid (the flat-space
+P-Cygni side of `ray_transfer_kerr_vs_flat`) is untouched -- it's a 1-D radial integral, not an image plane,
+and already does its own correct `2*pi*p*dp` area weighting.
+
+**FITS output gained self-describing grid metadata, found to be pure upside.** Checked first whether this
+would touch any existing convention: `ray_transfer_disc_wind.cpp`/`ray_transfer_disc_surface.cpp` write
+*no* `X0/XMAX/DX/NX` keywords at all (unlike the unrelated `imageplane_disc_image*`/`caustic_*` family which
+do), and their plot scripts already render bare pixel-index images with no coordinate axis -- so there was
+nothing to preserve. Added a `GRIDTYPE` keyword (`"linear"`/`"log"`, plus `LOGXMIN`/`LOGXMAX`/`LOGNX`/
+`LOGNLINX` and y-equivalents for provenance when log) and two small binary table extensions, `XGRID`
+(`X`, `DX` columns) and `YGRID` (`Y`, `DY`), correct and usable for either grid type -- using only the
+existing `create_table`/`write_table_column` API (the same technique `disc_ent_line_rbin.cpp`'s `DISC` table
+already uses for a 1-D lookup column; no changes to `fits_output.h`, which has no image-extension path for
+a bare 1-D array). The Python plotting scripts were **not** updated to read them (deferred, since they don't
+currently read any coordinate metadata for these two applications either) -- a log-grid run's FITS file is
+correct and self-describing but not yet prettily plottable; the CSV spectrum is unaffected either way.
+
+**Verification.**
+- New `src/tests/ray_transfer_grid_test.cpp` (see Sec 5.34 for how its `RayTransfer` construction calls were
+  later updated): `LinearRayTransferGrid` reproduces `RayTransfer`'s original pixel-center formula exactly
+  with `weight() == 1` throughout; `LogRayTransferGrid`'s `x`/`y`/`weight` match `LogImagePlane::ray_x`/
+  `ray_y`/`ray_weight` exactly at the equivalent flat index, with `dx(ix)*dy(iy) == weight(ix,iy)`; an
+  end-to-end `RayTransfer::run_raytrace()` run with a log grid matches an independent re-derivation of
+  `continuum_total`/`spec_total` from `continuum_map`/`flux_cube` weighted by the grid's own `weight(ix,iy)`
+  computed outside the class; and the same with a linear grid matches an unweighted hand-rolled sum over
+  `trace_pixel()` (to floating-point summation-order precision, not bit-exact, since `run_raytrace()`'s
+  per-row-then-critical-section merge order differs from a flat serial loop).
+- **Full backward-compatibility check, the same `git stash`-based method as every prior restructuring in this
+  section (Sec 5.24-5.32)**: stashed this entire change, rebuilt the pre-change code, re-ran all three
+  applications on their existing, unmodified par files (`grid_type` absent, defaulting to `"linear"`) at
+  `OMP_NUM_THREADS=1`, then restored this change, rebuilt, and re-ran the same par files again. Compared
+  bit-for-bit: `ray_transfer_disc_wind`'s and `ray_transfer_disc_surface`'s spectrum CSVs and every
+  CONTINUUM/TAU/FLUX FITS image (92 and 102 image HDUs respectively) were identical, and every FITS header
+  keyword shared between old and new matched exactly, with the *only* differences being the new, purely
+  additive `GRIDTYPE` keyword and `XGRID`/`YGRID` extensions; `ray_transfer_kerr_vs_flat`'s CSV was
+  byte-identical outright. Confirms the `weight() == 1` mechanism does exactly what it was designed to do.
+- `grid_type = log` sanity-checked end-to-end on all three applications on small grids: finite output
+  throughout, correct `GRIDTYPE`/`XGRID`/`YGRID` FITS metadata, and (for `ray_transfer_kerr_vs_flat`, whose
+  corona-hit count is a direct, cheap diagnostic) a markedly higher corona-hit fraction than the equivalent
+  linear grid at comparable total pixel count (129/576 vs. 99/3600) -- the expected, direct consequence of
+  concentrating resolution near the optical axis where the small photon-capture cross-section actually sits
+  (Sec 5.3, 5.18's discussion of exactly this resolution limit for the linear grid).
+
+## 5.34  Revisited: `plane` and `grid` were redundant -- two constructor overloads instead
+
+Asked to reconsider Sec 5.33's `RayTransfer` API: it took both `plane` (`const ImagePlane<T>&`, for the
+Kerr geodesic physics) and `grid` (`const RayTransferGrid<T>&`, for the pixel loop) as two independent
+constructor parameters, with a stated preference for using just the plane object, matching `Raytracer`'s own
+philosophy (construct one ray-source object, pass it in).
+
+**Why `RayTransferGrid` has to exist at all, answered directly.** `run_raytrace()` needs one uniform way to
+ask "how many pixels, where is pixel `(ix,iy)`, what's its weight," regardless of grid type. `ImagePlane`
+cannot answer this itself even in principle here: its `Nx`/`Ny` are private with no getter, and its own
+`ray_x`/`ray_y` use a "grid point" convention, not `RayTransfer`'s "pixel center" one -- and `imageplane.h`
+is not touched. `LogImagePlane` *can* answer it (`get_Nx`/`get_Ny`/`ray_x`/`ray_y`/`ray_weight` are public),
+but in a flat-ray-index shape, not `RayTransfer`'s `(ix,iy)` one. `RayTransferGrid` is the adapter that
+unifies both shapes into the one `run_raytrace()` drives polymorphically -- without it, `run_raytrace()`
+would need two separate implementations, one per grid type.
+
+**But the adapter didn't need to be something the caller builds and hands over as a second constructor
+argument.** `RayTransfer` gained two constructor overloads instead of one:
+- `RayTransfer(const ImagePlane<T>& plane, ..., int Nx, int Ny, T x0, T dx, T y0, T dy, ...)` -- restores
+  the *exact* signature from before `grid_type` existed at all.
+- `RayTransfer(const LogImagePlane<T>& plane, ...)` -- no grid parameters, since a `LogImagePlane` already
+  knows its own grid.
+
+Each overload builds and *owns* the right adapter internally (`m_grid` changed from a caller-owned
+`const RayTransferGrid<T>&` reference to an owned `std::unique_ptr<RayTransferGrid<T>>`, built via
+`make_unique<LinearRayTransferGrid<T>>(...)` or `make_unique<LogRayTransferGrid<T>>(plane)` in the
+respective constructor's member-initialiser list, with the common tail -- allocating `continuum_map`/
+`tau_map`/`flux_cube`/`spec_line`/`spec_total` from `m_grid->Nx()/Ny()` -- factored into a shared private
+`init_arrays()`; safe to own via `unique_ptr` since, unlike `ImagePlane`, `RayTransferGrid` does have a
+virtual destructor). Applications went back to constructing one `ImagePlane` or one `LogImagePlane` and
+passing it, exactly as before `RayTransferGrid` existed; the `grid_type` branch in each of the three
+applications now builds `linear_plane`/`log_plane` (unchanged rationale from Sec 5.33) and then picks the
+matching `RayTransfer` constructor overload, held via `unique_ptr<RayTransfer<double>>` since the two
+branches call genuinely different overloads and can't both initialise one stack-local variable directly.
+`RayTransferGrid`/`LinearRayTransferGrid`/`LogRayTransferGrid` stay public in `ray_transfer.h` (still useful
+for direct unit testing, and for a caller driving its own loop over `trace_pixel()` -- `ray_transfer_kerr_vs_flat.cpp` --
+via new `RayTransfer::grid_x()/grid_y()/grid_dx()/grid_dy()/grid_weight()` pass-through accessors added
+alongside `get_Nx()/get_Ny()`, exposing the grid the class built internally without exposing the grid object
+itself), but are no longer part of the public constructor API any application needs to touch.
+
+**A genuine correctness improvement, not just a style preference.** The two-parameter design allowed a real
+mismatch: nothing stopped a caller from passing a linear `plane` alongside a `grid` built from an unrelated
+`LogImagePlane` (or vice versa), silently producing inconsistent geometry -- redshifts computed from one
+plane's `D`/`incl`/`phi0`, pixel positions from a different plane's grid. The two-overload design makes this
+impossible by construction: the log-grid overload only accepts a `LogImagePlane`, which is simultaneously
+the only object that defines both its own physics and its own grid, so the two can never disagree. This
+matches the general principle already used for `spin` in every `RayTransfer` consumer (Sec 3's design note --
+passed once, explicitly, rather than trusted to agree with whatever `plane` happens to encode) but goes
+further: here the *type system*, not just a convention, enforces the invariant.
+
+**Verification.** Rebuilt everything (`ray_transfer` library, all three applications, `log_imageplane_test`,
+`ray_transfer_grid_test`, `ray_transfer_disc_wind_test`) -- all passing, all clean. `ray_transfer_grid_test`
+extended with explicit consistency checks that `RayTransfer::get_Nx()/get_Ny()/grid_x()/grid_y()/grid_dx()/
+grid_dy()/grid_weight()` (queried through `rt`, after construction via either overload) agree exactly with a
+standalone `LinearRayTransferGrid`/`LogRayTransferGrid` built independently with the same parameters --
+direct proof the internally-built adapter is wired correctly for both overloads.
+`ray_transfer_disc_wind_test.cpp`'s two placeholder `RayTransfer` constructions reverted to passing six
+placeholder scalars directly (`1, 1, 0.0, 1.0, 0.0, 1.0`), restoring that file to its exact
+pre-`grid_type` form. Re-ran `ray_transfer_disc_wind` with the previously-recorded small log-grid
+configuration (`log_x_min=1, log_x_max=20, log_Nx=12, log_Nlinx=4`) and a small linear one: identical
+`GRIDTYPE`/`CONTINUUM` max/spectrum values to the pre-redesign runs recorded in Sec 5.33, confirming this
+was a pure API/plumbing simplification with no change to any computed result.

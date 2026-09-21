@@ -5,12 +5,29 @@ dist = 1000
 incl = 60
 spin = 0.9
 plane_phi0 = 0
+
+# grid_type: "linear" (default) is the original uniformly-spaced grid (x0/xmax/Nx/y0/ymax/Ny below); "log"
+# is LogImagePlane's logarithmically-spaced grid (log_x_min/log_x_max/log_Nx/log_Nlinx and the y-equivalents
+# below), which concentrates resolution near the optical axis (shadow/photon ring) while covering a wide
+# field of view cheaply -- see src/raytracer/log_imageplane.h. Only the keys for the selected grid_type are
+# actually read; the other block's keys are ignored, so both can be left in the file at once.
+grid_type = linear
+
 x0 = -20
 xmax = 20
 Nx = 100
 y0 = -20
 ymax = 20
 Ny = 100
+
+# log grid (only read when grid_type = log): log_x_min/log_y_min must be > 0 (inner edge of the log zones);
+# log_Nx/log_Ny are the number of log-spaced bins per side, per axis; log_Nlinx/log_Nliny are the number of
+# (uniform) bins in the linear zone spanning the origin. y_* default to the x_* values if not given.
+log_x_min = 1.0
+log_x_max = 20.0
+log_Nx = 25
+log_Nlinx = 4
+
 symp_step = -1
 symp_order = 6
 # far-field step cap: default (0.01) is refined enough to avoid aliasing the wind's density gradient near

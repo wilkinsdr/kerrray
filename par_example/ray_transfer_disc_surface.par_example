@@ -5,12 +5,25 @@ dist = 1000
 incl = 60
 spin = 0.9
 plane_phi0 = 0
+
+# grid_type: "linear" (default, x0/xmax/Nx/y0/ymax/Ny below) or "log" (LogImagePlane, log_x_min/log_x_max/
+# log_Nx/log_Nlinx and the y-equivalents below) -- see ray_transfer_disc_wind.par_example for the full
+# explanation. Only the selected grid_type's keys are actually read.
+grid_type = linear
+
 x0 = -30
 xmax = 30
 Nx = 100
 y0 = -30
 ymax = 30
 Ny = 100
+
+# log grid (only read when grid_type = log)
+log_x_min = 1.0
+log_x_max = 30.0
+log_Nx = 25
+log_Nlinx = 4
+
 symp_step = -1
 symp_order = 6
 max_tstep = 0.01

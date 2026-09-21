@@ -42,3 +42,9 @@ target_link_libraries(ray_transfer_pcygni_test ray_transfer)
 
 add_executable(ray_transfer_disc_wind_test ray_transfer_disc_wind_test.cpp)
 target_link_libraries(ray_transfer_disc_wind_test ray_transfer)
+
+add_executable(log_imageplane_test log_imageplane_test.cpp)
+target_link_libraries(log_imageplane_test imageplane log_imageplane raytracer)
+
+add_executable(ray_transfer_grid_test ray_transfer_grid_test.cpp)
+target_link_libraries(ray_transfer_grid_test ray_transfer)

@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <memory>
 
 using namespace std;
 
@@ -73,10 +74,14 @@ int main(int argc, char** argv)
     const double spin = par_file.get_parameter<double>("spin", 0.0);
     const double dist = par_file.get_parameter<double>("dist", 1000.0);
     const double incl = par_file.get_parameter<double>("incl", 60.0);
-    const double x0 = par_file.get_parameter<double>("x0", -1.2 * R_out);
-    const double xmax = par_file.get_parameter<double>("xmax", 1.2 * R_out);
-    const int Nx = par_file.get_parameter<int>("Nx", 60);
     const double max_tstep = par_file.get_parameter<double>("max_tstep", 0.01);
+
+    // grid_type: "linear" (default) is ImagePlane's original uniformly-spaced, square x0/xmax/Nx grid;
+    // "log" is LogImagePlane's logarithmically-spaced grid (log_x_min/log_x_max/log_Nx/log_Nlinx and the
+    // y-equivalents -- left at their x defaults, an un-overridden log grid stays square too, matching this
+    // application's existing convention). See src/raytracer/log_imageplane.h and the RayTransferGrid
+    // comment in ray_transfer.h.
+    const string grid_type = par_file.get_parameter<string>("grid_type", "linear");
 
     // Optional equatorial disc (ray_transfer_disc_wind.cpp's DiscWithISCODestination, inner edge at the
     // ISCO): r_out_disc <= 0 (default) means no disc, preserving the spin = 0 isolated-redshift
@@ -105,14 +110,50 @@ int main(int argc, char** argv)
     SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(energy_min, energy_max, n_energy);
 
     // --- Kerr (Schwarzschild by default) run: sum over the image plane ---
-    const double dx = (xmax - x0) / Nx;
-    ImagePlane<double> plane(dist, incl, x0, xmax, dx, x0, xmax, dx, spin, 0.0);
+    // Image-plane grid: see ray_transfer_disc_wind.cpp's identical block for the full rationale (in
+    // particular why unique_ptr<own-concrete-type>, never a unique_ptr<ImagePlane<double>>, is required,
+    // and why RayTransfer's two constructor overloads take a plane object rather than a separate grid one).
+    unique_ptr<ImagePlane<double>> linear_plane;
+    unique_ptr<LogImagePlane<double>> log_plane;
+    double x0 = 0, xmax = 0, dx = 0;
+    int Nx = 0;
+
+    if (grid_type == "log")
+    {
+        const double log_x_min = par_file.get_parameter<double>("log_x_min");
+        const double log_x_max = par_file.get_parameter<double>("log_x_max");
+        const int log_Nx = par_file.get_parameter<int>("log_Nx");
+        const int log_Nlinx = par_file.get_parameter<int>("log_Nlinx");
+        const double log_y_min = par_file.get_parameter<double>("log_y_min", log_x_min);
+        const double log_y_max = par_file.get_parameter<double>("log_y_max", log_x_max);
+        const int log_Ny = par_file.get_parameter<int>("log_Ny", log_Nx);
+        const int log_Nliny = par_file.get_parameter<int>("log_Nliny", log_Nlinx);
+
+        log_plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
+                                                         log_y_min, log_y_max, log_Ny, log_Nliny, spin, 0.0);
+    }
+    else
+    {
+        x0 = par_file.get_parameter<double>("x0", -1.2 * R_out);
+        xmax = par_file.get_parameter<double>("xmax", 1.2 * R_out);
+        Nx = par_file.get_parameter<int>("Nx", 60);
+        dx = (xmax - x0) / Nx;
+
+        linear_plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, x0, xmax, dx, spin, 0.0);
+    }
+
     SphericalContinuumSource<double> corona(R_corona, I_corona);
     DiscWithISCODestination<double> disc(r_isco, r_out_disc);
     const RayDestination<double>* disc_ptr = (r_out_disc > 0) ? &disc : nullptr;
     if (disc_ptr) cout << "Disc enabled: ISCO at " << r_isco << ", outer edge " << r_out_disc << endl;
-    RayTransfer<double> rt(plane, spin, wind, line, bins, Nx, Nx, x0, dx, x0, dx, disc_ptr, &corona,
-                            source_mode, density_scale);
+    unique_ptr<RayTransfer<double>> rt_ptr;
+    if (log_plane)
+        rt_ptr = make_unique<RayTransfer<double>>(*log_plane, spin, wind, line, bins, disc_ptr, &corona,
+                                                    source_mode, density_scale);
+    else
+        rt_ptr = make_unique<RayTransfer<double>>(*linear_plane, spin, wind, line, bins, Nx, Nx, x0, dx, x0, dx,
+                                                    disc_ptr, &corona, source_mode, density_scale);
+    RayTransfer<double>& rt = *rt_ptr;
     rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT); symplectic
                                     // step/order left at their defaults (1/PRECISION, order 6)
 
@@ -122,25 +163,33 @@ int main(int argc, char** argv)
     double kerr_tau_max = 0, kerr_tau_sum = 0;
     long kerr_n_thick = 0;
 
+    const int Ny = rt.get_Ny();
+    Nx = rt.get_Nx();   // authoritative dimensions regardless of grid_type (see above)
+
     #pragma omp parallel for schedule(dynamic) reduction(+:kerr_continuum_total, n_corona) \
         reduction(max:kerr_tau_max) reduction(+:kerr_tau_sum, kerr_n_thick)
     for (int ix = 0; ix < Nx; ix++)
     {
         vector<double> line_emission(n_energy), absorption(n_energy);
         vector<double> row_line(n_energy, 0.0), row_total(n_energy, 0.0);
-        const double x = x0 + (ix + 0.5) * dx;
-        for (int iy = 0; iy < Nx; iy++)
+        const double x = rt.grid_x(ix);
+        for (int iy = 0; iy < Ny; iy++)
         {
-            const double y = x0 + (iy + 0.5) * dx;
+            const double y = rt.grid_y(iy);
+            // Diagnostic-only accumulators (kerr_tau_max/kerr_tau_sum/kerr_n_thick below) are left as
+            // plain per-pixel-count statistics regardless of grid_type; only the physically-integrated
+            // flux/continuum sums are area-weighted -- see RayTransferGrid::weight()'s comment
+            // (ray_transfer.h) for why grid_type=linear's weight is fixed at 1, not dx*dy.
+            const double w = rt.grid_weight(ix, iy);
             double continuum;
             if (rt.trace_pixel(x, y, line_emission, absorption, continuum)) ++n_corona;
-            kerr_continuum_total += continuum;
+            kerr_continuum_total += continuum * w;
             double tau_peak = 0;
             for (int j = 0; j < n_energy; j++)
             {
                 const double flux = continuum * exp(-absorption[j]) + line_emission[j];
-                row_line[j] += line_emission[j];
-                row_total[j] += flux;
+                row_line[j] += line_emission[j] * w;
+                row_total[j] += flux * w;
                 if (absorption[j] > tau_peak) tau_peak = absorption[j];
             }
             // peak optical depth over the energy grid for this sightline (absorption[j] is accumulated
@@ -154,9 +203,9 @@ int main(int argc, char** argv)
         #pragma omp critical
         for (int j = 0; j < n_energy; j++) { kerr_line[j] += row_line[j]; kerr_total[j] += row_total[j]; }
     }
-    cout << "Kerr (spin=" << spin << "): " << n_corona << " / " << (Nx*Nx) << " pixels hit the corona" << endl;
-    cout << "Kerr wind optical depth: peak tau = " << kerr_tau_max << ", mean tau = " << (kerr_tau_sum / (Nx*Nx))
-         << ", " << kerr_n_thick << " / " << (Nx*Nx) << " sightlines optically thick (tau > 1)" << endl;
+    cout << "Kerr (spin=" << spin << "): " << n_corona << " / " << (Nx*Ny) << " pixels hit the corona" << endl;
+    cout << "Kerr wind optical depth: peak tau = " << kerr_tau_max << ", mean tau = " << (kerr_tau_sum / (Nx*Ny))
+         << ", " << kerr_n_thick << " / " << (Nx*Ny) << " sightlines optically thick (tau > 1)" << endl;
 
     // --- Flat run: sum over impact parameter (as ray_transfer_pcygni.cpp) ---
     FlatRayTransfer<double> flat_rt(wind, line, bins);
