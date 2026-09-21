@@ -1,8 +1,9 @@
 """
-P-Cygni residual flux profile produced by src/ray_transfer/ray_transfer_pcygni.cpp.
+Image-plane-integrated line/continuum spectrum produced by src/ray_transfer/ray_transfer_disc_surface.cpp
+(the *_spectrum.csv sibling of the main FITS output).
 
 Usage:
-  python python/ray_transfer_pcygni_plot.py dat/ray_transfer_pcygni.csv [dat/ray_transfer_pcygni.png] [--show]
+  python python/ray_transfer_disc_surface_spectrum_plot.py dat/ray_transfer_disc_surface_spectrum.csv [out.png] [--show]
 """
 import sys
 
@@ -29,8 +30,8 @@ fig, ax = plt.subplots(figsize=(6, 4))
 ax.plot(energy, residual, color="C0")
 ax.axhline(1.0, color="gray", lw=0.8, ls="--")
 ax.set_xlabel("energy")
-ax.set_ylabel("residual flux (continuum = 1)")
-ax.set_title("P-Cygni profile (FlatRayTransfer, spherical wind, no black hole)")
+ax.set_ylabel("flux / unabsorbed continuum")
+ax.set_title("Disc-surface gas-layer line spectrum (RayTransfer, Kerr backend)")
 fig.tight_layout()
 fig.savefig(out, dpi=150)
 print(f"Wrote {out}")

@@ -1,11 +1,11 @@
 """
-Continuum and flux-cube images produced by src/ray_transfer/ray_transfer_disc_wind.cpp.
+Continuum and flux-cube images produced by src/ray_transfer/ray_transfer_disc_surface.cpp.
 
 Usage:
-  python python/ray_transfer_disc_wind_plot.py dat/ray_transfer_disc_wind.fits [dat/ray_transfer_disc_wind.png] [--show]
+  python python/ray_transfer_disc_surface_plot.py dat/ray_transfer_disc_surface.fits [dat/ray_transfer_disc_surface.png] [--show]
 
-Plots the CONTINUUM extension and one FLUX-cube energy slice near the line's rest energy (the middle
-frame of the cube) side by side. Pass --show to also display the figure on screen.
+Plots the CONTINUUM extension (disc's emitting annulus) and one FLUX-cube energy slice near the line's
+rest energy (the middle frame of the cube) side by side. Pass --show to also display the figure on screen.
 """
 import sys
 
@@ -29,13 +29,13 @@ hdul = fits.open(path)
 continuum = hdul["CONTINUUM"].data
 ne = hdul[0].header.get("NE")
 n_ext = len(hdul)
-# the flux cube occupies extensions 2..n_ext-1 (CONTINUUM is 1); take the middle energy slice
-mid_ext = 2 + (n_ext - 2) // 2
+# the flux cube occupies extensions 3..n_ext-1 (CONTINUUM is 1, TAU is 2); take the middle energy slice
+mid_ext = 3 + (n_ext - 3) // 2
 flux_mid = hdul[mid_ext].data
 
 fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
 im0 = axes[0].imshow(continuum, origin="lower", cmap="inferno")
-axes[0].set_title("Continuum (corona only)")
+axes[0].set_title("Continuum (disc annulus only)")
 fig.colorbar(im0, ax=axes[0], fraction=0.046)
 
 im1 = axes[1].imshow(flux_mid, origin="lower", cmap="inferno")

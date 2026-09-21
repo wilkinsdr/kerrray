@@ -3,12 +3,18 @@ Image-plane-integrated line/continuum spectrum produced by src/ray_transfer/ray_
 (the *_spectrum.csv sibling of the main FITS output).
 
 Usage:
-  python python/ray_transfer_disc_wind_spectrum_plot.py dat/ray_transfer_disc_wind_spectrum.csv [out.png]
+  python python/ray_transfer_disc_wind_spectrum_plot.py dat/ray_transfer_disc_wind_spectrum.csv [out.png] [--show]
 """
 import sys
+
+show = "--show" in sys.argv
+if show:
+    sys.argv.remove("--show")
+
 import csv
 import matplotlib
-matplotlib.use("Agg")
+if not show:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 if len(sys.argv) < 2:
@@ -29,3 +35,5 @@ ax.set_title("Disc-wind line spectrum (RayTransfer, Kerr backend)")
 fig.tight_layout()
 fig.savefig(out, dpi=150)
 print(f"Wrote {out}")
+if show:
+    plt.show()

@@ -7,6 +7,7 @@
 #include "ray_transfer.h"
 #include <algorithm>
 #include <iostream>
+#include "../include/progress_bar.h"
 
 // =================================================================================================
 // accumulate_step
@@ -206,9 +207,19 @@ bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::v
             const T rhosq = r*r + (m_spin*cos(q.theta))*(m_spin*cos(q.theta));
             const T d_lambda = rhosq * hstep;
             const T density = m_field.density(r, q.theta, q.phi);
-            const T source = (m_source_mode == WindSourceMode::Illumination)
-                              ? m_corona->illumination(r, q.theta, q.phi, m_spin)
-                              : m_density_scale * density;
+            T source;
+            switch (m_source_mode)
+            {
+                case WindSourceMode::Illumination:
+                    source = m_corona->illumination(r, q.theta, q.phi, m_spin);
+                    break;
+                case WindSourceMode::PowerLaw:
+                    source = m_powerlaw_norm * pow(r * sin(q.theta) / m_powerlaw_ref_r, -m_powerlaw_index);
+                    break;
+                default:
+                    source = m_density_scale * density;
+                    break;
+            }
 
             accumulate_step<T>(d_lambda, g, density, source, m_line, m_bins, absorption, line_emission);
         }
@@ -226,13 +237,16 @@ bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::v
         T r_new, sd_new;
         mino_r_from_u<T>(q.u, a, r_new, sd_new);
 
-        // --- accretion disc: an opaque stopping surface, hit exactly by bisection like any other
-        //     RayDestination boundary (see propagate_symplectic_impl) --------------------------------
-        if (m_disc != nullptr && m_disc->reached(r_new, q.theta, q.phi, theta_prev))
-            return false;   // blocked: no continuum; line_emission/absorption already accumulated stand
-
-        // --- corona: transition from outside to inside -----------------------------------------------
-        const bool now_in_corona = (m_corona != nullptr) && m_corona->contains(r_new, q.theta, q.phi);
+        // --- corona: transition from outside to inside, checked *before* the disc so that a disc-surface
+        //     continuum source (e.g. DiscContinuumSource, continuum_source.h -- a zero-thickness annulus
+        //     on theta = pi/2 detected via the crossing-aware contains() overload, using the fixed
+        //     theta_prev captured here) sharing the very same equatorial crossing as a wider opaque disc
+        //     (e.g. DiscWithISCODestination) takes priority within its own annulus, rather than the disc
+        //     always blocking it first. For a genuine volume corona (SphericalContinuumSource) the
+        //     crossing-aware overload just falls back to the pointwise test, so this reorder does not
+        //     change which condition fires when the two regions are geometrically disjoint, as in
+        //     ray_transfer_disc_wind.cpp -----------------------------------------------------------------
+        const bool now_in_corona = (m_corona != nullptr) && m_corona->contains(r_new, q.theta, q.phi, theta_prev);
         if (now_in_corona && !was_in_corona)
         {
             MinoState<T> q_hit;
@@ -241,7 +255,7 @@ bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::v
                                 {
                                     T rt, sdt;
                                     mino_r_from_u<T>(trial.u, a, rt, sdt);
-                                    return m_corona->contains(rt, trial.theta, trial.phi);
+                                    return m_corona->contains(rt, trial.theta, trial.phi, theta_prev);
                                 }, q_hit);
 
             T r_hit, sd_hit;
@@ -259,6 +273,11 @@ bool RayTransfer<T>::trace_pixel(T x, T y, std::vector<T>& line_emission, std::v
             continuum = m_corona->intensity / (g_corona * g_corona * g_corona);
             return true;
         }
+
+        // --- accretion disc: an opaque stopping surface, hit exactly by bisection like any other
+        //     RayDestination boundary (see propagate_symplectic_impl) --------------------------------
+        if (m_disc != nullptr && m_disc->reached(r_new, q.theta, q.phi, theta_prev))
+            return false;   // blocked: no continuum; line_emission/absorption already accumulated stand
 
         r = r_new;
     }
@@ -291,6 +310,15 @@ void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
     long n_corona_local = 0;
     T continuum_total_local = 0;
     T tau_corona_max_local = 0;
+
+    // Same ProgressBar/atomic-counter pattern as Raytracer::run_raytrace (raytracer.cpp): one shared counter
+    // incremented per pixel traced (not per row), so the bar advances smoothly regardless of how the row
+    // loop happens to be scheduled across threads. show_progress's sign selects the drawn bar vs. a plain
+    // "done/total" line (ProgressBar's own convention); its magnitude is the update interval, in pixels.
+    const long n_pixels = (long)Nx * Ny;
+    ProgressBar prog(n_pixels, "Pixel", 0, (show_progress > 0));
+    show_progress = abs(show_progress);
+    long pixels_done = 0;
 
     // Pixels are independent (trace_pixel is const and touches no shared mutable state), so the row loop
     // parallelises directly -- each thread gets its own line_emission/absorption scratch vectors and a
@@ -325,6 +353,18 @@ void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
             }
             tmap[ix][iy] = tau_peak;
             if (hit_corona && tau_peak > tau_corona_max_local) tau_corona_max_local = tau_peak;
+
+            if (show_progress != 0)
+            {
+                long done;
+                #pragma omp atomic capture
+                done = ++pixels_done;
+                if (done % show_progress == 0)
+                {
+                    #pragma omp critical
+                    prog.show(done);
+                }
+            }
         }
 
         #pragma omp critical
@@ -334,10 +374,9 @@ void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
                 spec_line[j] += row_spec_line[j];
                 spec_total[j] += row_spec_total[j];
             }
-            if (show_progress && ix % std::max(1, Nx / 20) == 0)
-                std::cout << "row " << ix << "/" << Nx << std::endl;
         }
     }
+    prog.done();
 
     n_corona = n_corona_local;
     continuum_total = continuum_total_local;

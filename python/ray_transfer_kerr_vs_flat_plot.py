@@ -4,12 +4,18 @@ spherical wind + static corona/star traced through the full Kerr (Schwarzschild,
 through flat spacetime, isolating the effect of gravitational redshift.
 
 Usage:
-  python python/ray_transfer_kerr_vs_flat_plot.py dat/ray_transfer_kerr_vs_flat.csv [out.png]
+  python python/ray_transfer_kerr_vs_flat_plot.py dat/ray_transfer_kerr_vs_flat.csv [out.png] [--show]
 """
 import sys
+
+show = "--show" in sys.argv
+if show:
+    sys.argv.remove("--show")
+
 import csv
 import matplotlib
-matplotlib.use("Agg")
+if not show:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 if len(sys.argv) < 2:
@@ -33,3 +39,5 @@ ax.legend()
 fig.tight_layout()
 fig.savefig(out, dpi=150)
 print(f"Wrote {out}")
+if show:
+    plt.show()

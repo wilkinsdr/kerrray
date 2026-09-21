@@ -5,12 +5,18 @@ continuum = 0 everywhere and total_flux == line_flux; this plots line_flux direc
 continuum-normalised residual, which is undefined here).
 
 Usage:
-  python python/ray_transfer_disc_wind_R200_tau1_plot.py dat/ray_transfer_disc_wind_R200_tau1_spectrum.csv [out.png]
+  python python/ray_transfer_disc_wind_R200_tau1_plot.py dat/ray_transfer_disc_wind_R200_tau1_spectrum.csv [out.png] [--show]
 """
 import sys
+
+show = "--show" in sys.argv
+if show:
+    sys.argv.remove("--show")
+
 import csv
 import matplotlib
-matplotlib.use("Agg")
+if not show:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 path = sys.argv[1] if len(sys.argv) > 1 else "dat/ray_transfer_disc_wind_R200_tau1_spectrum.csv"
@@ -30,3 +36,5 @@ ax.legend()
 fig.tight_layout()
 fig.savefig(out, dpi=150)
 print(f"Wrote {out}")
+if show:
+    plt.show()

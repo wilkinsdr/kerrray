@@ -1274,3 +1274,107 @@ from `ContinuumSource<T>` and implicitly converts. A few doc comments referencin
 **Verification**: same `git stash`-based method as Sec 5.24-5.29 -- rebuilt against `a0d9177`, re-ran
 `ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides, spectrum
 CSV and stdout diagnostics identical. Both unit tests still pass with identical numbers.
+
+## 5.31  `DiscSurface`, `DiscContinuumSource` and `ray_transfer_disc_surface`: a co-rotating gas layer over an emitting disc annulus
+
+A new application, `ray_transfer_disc_surface`, alongside `ray_transfer_disc_wind` rather than replacing
+it: a cylindrical region of gas sitting above the disc surface (rather than a spherical wind), illuminated
+by an annulus of the disc surface itself (rather than a compact spherical corona). Three new pieces:
+
+**`DiscSurface<T>`** (`rtfield.h`): an `RTField` occupying cylindrical radius `R_in..R_out` and height
+`z_min..z_max` above the equatorial plane (`R = r*sin(theta)`, `z = |r*cos(theta)|` -- written symmetric in
+`|z|`, which is harmless: an opaque disc always stops a ray at `theta = pi/2` before it could ever reach the
+far side, so only the near face is actually traced). Velocity is purely azimuthal, co-rotating with the
+disc element at the same cylindrical radius directly below -- `disc_velocity(R, spin, +1)` (kerr.h) boosted
+into the off-equatorial point via the same general locally-rotating-observer metric construction
+`RayDestination::four_velocity`'s default uses (`ray_destination.h`), duplicated locally rather than
+factored into a shared helper to avoid touching that already-verified file for a handful of lines of
+algebra. `flat_four_velocity()` is a genuine physical construction, not a stub: the Newtonian circular-orbit
+speed `v(R) = sqrt(GM/R) = 1/sqrt(R)` (`GM = 1`, kerr.h's convention) at flat Cartesian cylindrical radius
+`R = sqrt(x^2+y^2)`, tangential in the `(x,y)` plane -- confirmed by direct check that both `four_velocity`
+and `flat_four_velocity` normalise to `g_mn et^m et^n = +1` under their respective metrics (a standalone
+`rtfield.h`-only compile, no link against `ray_transfer.cpp` needed). Density has three selectable modes,
+`DiscSurfaceDensityMode { Constant, RadiusPowerLaw, HeightPowerLaw }` (`n0`; `n0*(R/R_in)^-p`;
+`n0*(z/z_min)^-p`).
+
+**`DiscContinuumSource<T>`** (`continuum_source.h`): the disc surface itself, restricted to an annulus
+`R_in <= r <= R_out`, as a continuum source. A zero-thickness surface can't be tested pointwise the way
+`SphericalContinuumSource` tests a volume, so `ContinuumSource::contains()` gained a **crossing-aware
+overload** mirroring `RayDestination::reached(r,theta,phi,prev_theta)`:
+```cpp
+virtual bool contains(T r, T theta, T phi) const = 0;
+virtual bool contains(T r, T theta, T phi, T prev_theta) const { return contains(r, theta, phi); }
+```
+fully backward-compatible (the default just calls the 3-argument test, so `SphericalContinuumSource` is
+untouched). `DiscContinuumSource::contains(r,theta,phi)` (no `prev_theta`) is always `false`; the 4-argument
+override checks `r` in range and a sign change of `theta - pi/2` -- exactly `DiscWithISCODestination`'s own
+crossing test. `four_velocity()` uses the exact equatorial Keplerian orbit (`disc_velocity_vector`, kerr.h,
+which already assumes `theta = pi/2` -- exact here, unlike `DiscSurface`'s off-plane boost).
+`illumination()` (needed only so the class isn't abstract; not this application's source function, see
+below) is a minimal mean-radius-ring fallback, same `dilution_factor` construction as
+`SphericalContinuumSource::illumination`.
+
+**Reordering `trace_pixel`'s corona/disc check** (`ray_transfer.cpp`): the disc-surface source and a wider
+opaque disc (`DiscWithISCODestination`, ISCO to `r_out_disc`) both fire on the *same* equatorial crossing
+when the emitting annulus is a subset of the full disc. Previously the disc-stop check ran first and
+returned immediately, so the corona would never get a chance to register. Fixed by checking the
+corona-crossing first (now using the crossing-aware `contains()` throughout, including the bisection
+predicate that locates the exact crossing point) and falling through to the disc-stop check only if it
+doesn't fire. For a genuine volume corona (`SphericalContinuumSource`) the crossing-aware overload just
+falls back to the pointwise test, so this is a no-op wherever the two regions are geometrically disjoint, as
+in `ray_transfer_disc_wind` (compact corona near the BH vs. a disjoint disc annulus further out).
+
+**`WindSourceMode::PowerLaw`** (`ray_transfer.h`/`.cpp`): a third source-function mode alongside
+`Density`/`Illumination`, `source = powerlaw_norm * (R_cyl/powerlaw_ref_r)^-powerlaw_index` where
+`R_cyl = r*sin(theta)` is the wind point's own cylindrical radius -- independent of any `ContinuumSource`
+(works with `corona == nullptr`), configured via `set_powerlaw_source(norm, ref_r, index)`. Added because an
+accurate `illumination()` for an *extended* source like `DiscContinuumSource` would need integrating over
+the whole annulus at every wind point (the point-source dilution-factor shortcut `SphericalContinuumSource`
+uses doesn't generalise); a direct power law in the wind's own geometry sidesteps that harder problem
+entirely and is the recommended `source_mode` for `ray_transfer_disc_surface`.
+
+**`ray_transfer_disc_surface.cpp`**: the disc-surface analogue of `ray_transfer_disc_wind.cpp` -- same image
+plane/`run_raytrace()`/CSV+FITS structure, `gas = DiscSurface<double>(...)` in place of the spherical wind,
+`corona = DiscContinuumSource<double>(...)` in place of the spherical corona, `disc =
+DiscWithISCODestination<double>(r_isco, r_out_disc)` for the rest of the (opaque, non-emitting) disc.
+Par-file keys: `R_in/R_out/z_min/z_max/density_mode/n0/density_index` (gas layer), `R_in_corona/
+R_out_corona/I_corona` (emitting annulus), `r_out_disc` (full disc), `source_mode` (`density`|`powerlaw`,
+no `illumination` option here) with `powerlaw_norm/powerlaw_ref_r/powerlaw_index`.
+
+**Verification**: the three shared-code changes above (`WindSourceMode::PowerLaw`, the crossing-aware
+`contains()` default, the corona/disc reorder) were checked against `ray_transfer_disc_wind` with the same
+`git stash`-based method as every prior step in this section -- rebuilt against the pre-change commit,
+re-ran on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1` on both sides: spectrum CSV, stdout
+diagnostics and all FITS HDUs identical. The new classes' 4-velocity constructions were checked directly
+(standalone compiles against `rtfield.h`/`continuum_source.h` alone) to normalise to `g_mn et^m et^n = +1`
+under their respective metrics, and `DiscContinuumSource::contains()`'s crossing logic was checked against
+hand-picked in/out-of-annulus and same-side/crossing `theta` cases. `ray_transfer_disc_surface` itself run
+on a 40x40/30-bin grid: sensible pixel counts (310/1600 hit the annulus), optical depths, and a finite,
+smoothly-varying residual spectrum.
+
+Two Python plotting scripts added alongside the `ray_transfer_disc_wind` ones:
+`python/ray_transfer_disc_surface_plot.py` (continuum + mid-energy flux-cube images -- note the flux cube's
+first extension is offset by 3, not 2, since `TAU` sits between `CONTINUUM` and the flux frames) and
+`python/ray_transfer_disc_surface_spectrum_plot.py` (residual spectrum). Both verified against an actual
+run: the continuum/flux images show the expected annulus shape with a Doppler-brightened approaching side
+and a hole where the ISCO excludes the inner disc, and the spectrum shows a smooth absorption trough.
+
+## 5.32  `RayTransfer::run_raytrace`'s progress reporting: `ProgressBar`, matching `Raytracer`
+
+`run_raytrace` previously printed a plain `"row ix/Nx"` line every ~5% of rows, from inside the per-row
+critical section. Replaced with the same `ProgressBar` (`progress_bar.h`) / shared-atomic-counter pattern
+`Raytracer::run_raytrace` already uses (`raytracer.cpp`): a counter is incremented once per pixel traced
+(`#pragma omp atomic capture`), and every `show_progress`-th increment triggers `prog.show(done)` under a
+critical section; `prog.done()` prints the trailing newline once the loop finishes. `show_progress`'s sign
+now carries the same meaning as `Raytracer`'s -- positive draws a live in-place bar, negative prints plain
+"done/total" lines, `0` disables it entirely -- and its magnitude is the update interval in pixels traced,
+rather than rows. Counting per-pixel (not per-row) means the bar advances smoothly regardless of how OpenMP
+happens to schedule rows across threads, exactly matching how `Raytracer` counts per-ray rather than per
+some coarser unit.
+
+**Verification**: purely a stdout-formatting change (no numeric code touched), confirmed with the same
+`git stash`-based method as every other step -- rebuilt against the pre-change commit, re-ran
+`ray_transfer_disc_wind` on the same 24x24/30-bin par file with `OMP_NUM_THREADS=1`: spectrum CSV and all
+FITS HDUs identical. Ran interactively (multi-threaded, piped through `grep`) to confirm the bar itself
+renders using the expected escape sequences (`\e[?25l`/`\e[?25h` cursor hide/show, `\r` carriage return),
+counting cleanly from 1 to `Nx*Ny` with no duplicate or skipped values despite the parallel row loop.

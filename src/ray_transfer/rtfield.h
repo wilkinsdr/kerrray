@@ -174,4 +174,105 @@ public:
     }
 };
 
+// -----------------------------------------------------------------------------------------------
+// DiscSurface: a cylindrical region of gas sitting above the surface of the accretion disc (assumed to
+// lie in the equatorial plane, theta = pi/2), between cylindrical radii R_in/R_out and cylindrical
+// heights z_min/z_max. Velocity is purely azimuthal, co-rotating with the disc element at the same
+// cylindrical radius directly below (Keplerian, disc_velocity() in kerr.h) -- no radial or vertical
+// motion. Written symmetric in |z| (both faces of the disc), which is harmless in practice: an
+// accompanying opaque disc (e.g. DiscWithISCODestination) always stops a ray at theta = pi/2 before it
+// could ever reach the far side, so only the near face is actually traced.
+//
+// density_index (RadiusPowerLaw/HeightPowerLaw only) is the exponent p in the profiles below; unused
+// (may be left at its default) for Constant.
+// -----------------------------------------------------------------------------------------------
+enum class DiscSurfaceDensityMode { Constant, RadiusPowerLaw, HeightPowerLaw };
+
+template <typename T>
+class DiscSurface : public RTField<T>
+{
+public:
+    T R_in, R_out;      // cylindrical radius range
+    T z_min, z_max;     // cylindrical height range (above the disc, |z| = |r cos(theta)|)
+    DiscSurfaceDensityMode density_mode;
+    T n0;               // density normalisation: Constant -> density == n0 throughout;
+                         // RadiusPowerLaw -> density(R_in) == n0; HeightPowerLaw -> density(z_min) == n0
+    T density_index;    // exponent p (RadiusPowerLaw/HeightPowerLaw only)
+
+    DiscSurface(T R_in, T R_out, T z_min, T z_max, DiscSurfaceDensityMode density_mode, T n0, T density_index = 0)
+        : R_in(R_in), R_out(R_out), z_min(z_min), z_max(z_max), density_mode(density_mode),
+          n0(n0), density_index(density_index)
+    {
+    }
+
+    static void cylindrical(T r, T theta, T& R, T& z)
+    {
+        R = r * sin(theta);
+        z = fabs(r * cos(theta));
+    }
+
+    bool in_wind(T r, T theta, T phi) const override
+    {
+        T R, z;
+        cylindrical(r, theta, R, z);
+        return R >= R_in && R <= R_out && z >= z_min && z <= z_max;
+    }
+
+    T density(T r, T theta, T phi) const override
+    {
+        if (!in_wind(r, theta, phi)) return 0;
+        T R, z;
+        cylindrical(r, theta, R, z);
+        switch (density_mode)
+        {
+            case DiscSurfaceDensityMode::RadiusPowerLaw: return n0 * pow(R / R_in, -density_index);
+            case DiscSurfaceDensityMode::HeightPowerLaw: return n0 * pow(z / z_min, -density_index);
+            default: return n0;
+        }
+    }
+
+    // Purely azimuthal, co-rotating at the Keplerian angular velocity of the disc element at the same
+    // cylindrical radius R (disc_velocity(), kerr.h), boosted into the off-equatorial point (r, theta) via
+    // the same general locally-rotating-observer construction RayDestination::four_velocity's default uses
+    // (ray_destination.h) -- duplicated here (rather than shared) to avoid touching that already-verified
+    // file for a handful of lines of metric algebra.
+    void four_velocity(T r, T theta, T phi, T spin, T et[4]) const override
+    {
+        T R, z;
+        cylindrical(r, theta, R, z);
+        const T V = disc_velocity<T>(R, spin, +1);
+
+        const T rhosq   = r*r + (spin*cos(theta))*(spin*cos(theta));
+        const T delta   = r*r - 2*r + spin*spin;
+        const T sigmasq = (r*r + spin*spin)*(r*r + spin*spin) - spin*spin*delta*sin(theta)*sin(theta);
+        const T e2nu    = rhosq * delta / sigmasq;
+        const T e2psi   = sigmasq * sin(theta)*sin(theta) / rhosq;
+        const T omega   = 2*spin*r / sigmasq;
+
+        const T gamma_factor = 1 / sqrt(1 - (V - omega)*(V - omega)*e2psi/e2nu);
+        et[0] = gamma_factor / sqrt(e2nu);
+        et[1] = 0;
+        et[2] = 0;
+        et[3] = gamma_factor * V / sqrt(e2nu);
+    }
+
+    // Flat-space equivalent: as if this cylinder were corotating with an accretion disc with Keplerian
+    // orbital velocity as a function of (flat, Cartesian) cylindrical radius R = sqrt(x^2+y^2) -- the
+    // Newtonian circular-orbit speed v(R) = sqrt(GM/R) = 1/sqrt(R) (GM = 1, kerr.h's convention), which is
+    // exactly disc_velocity(R, 0, +1)*R (the spin = 0 coordinate angular velocity times R) -- purely
+    // tangential motion in the (x,y) plane, no vertical or radial component.
+    void flat_four_velocity(T x, T y, T z, T et[4]) const override
+    {
+        const T R = sqrt(x*x + y*y);
+        if (R <= 0) { et[0] = 1; et[1] = et[2] = et[3] = 0; return; }
+        const T omega = disc_velocity<T>(R, T(0), +1);
+        const T v = omega * R;
+        const T gamma = 1 / sqrt(1 - v*v);
+        et[0] = gamma;
+        et[1] = -gamma * v * (y / R);
+        et[2] =  gamma * v * (x / R);
+        et[3] = 0;
+    }
+};
+
 #endif /* RTFIELD_H_ */

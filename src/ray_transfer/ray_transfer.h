@@ -161,7 +161,7 @@ private:
 // the corona contribute a continuum; the wind's line emission/absorption is accumulated along the whole
 // traced path regardless of the ray's eventual fate (corona, disc, escape, step limit).
 //
-// The wind's own line-emission source function S(r) (accumulate_step's "source" parameter) has two modes:
+// The wind's own line-emission source function S(r) (accumulate_step's "source" parameter) has three modes:
 //   Density      S = density_scale * density(r,theta,phi) -- a simple, quick placeholder with no tie to
 //                how brightly the corona actually illuminates that point; needs re-tuning (density_scale)
 //                if the wind or corona parameters change.
@@ -171,9 +171,14 @@ private:
 //                reaches every point along an effectively radial path (see
 //                SphericalContinuumSource::illumination, continuum_source.h, for the exact redshift factor
 //                used and what is approximated).
+//   PowerLaw     S = powerlaw_norm * (R_cyl/powerlaw_ref_r)^-powerlaw_index, R_cyl = r*sin(theta) -- a
+//                direct function of the wind point's own cylindrical radius, set by
+//                set_powerlaw_source() below; independent of any ContinuumSource (works with corona ==
+//                nullptr), for extended sources (e.g. DiscContinuumSource, continuum_source.h) where an
+//                accurate illumination() would need integrating over the whole source.
 // Illumination requires corona != nullptr; falls back to Density (density_scale = 1) if corona is null.
 // -----------------------------------------------------------------------------------------------
-enum class WindSourceMode { Density, Illumination };
+enum class WindSourceMode { Density, Illumination, PowerLaw };
 
 template <typename T>
 class RayTransfer
@@ -209,6 +214,13 @@ public:
     int  get_symplectic_order() const { return m_order; }
     void set_max_tstep(T max, T rlim = MAXDT_RLIM) { m_max_tstep = max; m_maxtstep_rlim = rlim; }
 
+    // WindSourceMode::PowerLaw's normalisation/reference radius/exponent (see the enum comment above).
+    // Only read when source_mode == PowerLaw; no effect otherwise.
+    void set_powerlaw_source(T norm, T ref_r, T index)
+    {
+        m_powerlaw_norm = norm; m_powerlaw_ref_r = ref_r; m_powerlaw_index = index;
+    }
+
     // Trace the ray landing at image-plane position (x, y).  Returns true iff the ray terminated on the
     // corona (continuum > 0 in that case; 0 otherwise -- blocked by the disc, escaped, stuck at the step
     // limit, or non-finite initial data, e.g. the on-axis image-plane ray).  The observed flux per bin is
@@ -229,6 +241,10 @@ public:
     // are independent (trace_pixel is const, touches no shared state), so the row loop is parallelised
     // internally exactly as it was at the application level. r_max/steplim: see trace_pixel() above --
     // resolved once here (not once per pixel) and passed through to every trace_pixel() call.
+    //
+    // show_progress: same convention as Raytracer::run_raytrace's own ProgressBar (progress_bar.h) --
+    // positive draws a live bar, negative prints a plain "done/total" line, 0 disables it; the magnitude
+    // is the update interval in pixels traced.
     void run_raytrace(T r_max = -1, int steplim = -1, int show_progress = 1);
 
     // Per-pixel/per-bin results, allocated by the constructor and filled by run_raytrace().
@@ -267,6 +283,7 @@ private:
     T m_max_tstep, m_max_phistep, m_maxtstep_rlim;
     WindSourceMode m_source_mode;
     T m_density_scale;
+    T m_powerlaw_norm = 0, m_powerlaw_ref_r = 1, m_powerlaw_index = 0;
 };
 
 #endif /* RAY_TRANSFER_H_ */

@@ -3,12 +3,18 @@ Overlay of the R0 = 50 disc-wind spectrum at several values of peak wind optical
 (docs/plan_ray_transfer.md Sec 5.19-5.21).
 
 Usage:
-  python python/ray_transfer_disc_wind_tau_compare_plot.py out.png label1:path1.csv label2:path2.csv ...
+  python python/ray_transfer_disc_wind_tau_compare_plot.py out.png label1:path1.csv label2:path2.csv ... [--show]
 """
 import sys
+
+show = "--show" in sys.argv
+if show:
+    sys.argv.remove("--show")
+
 import csv
 import matplotlib
-matplotlib.use("Agg")
+if not show:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 out = sys.argv[1]
@@ -36,3 +42,5 @@ ax.legend()
 fig.tight_layout()
 fig.savefig(out, dpi=150)
 print(f"Wrote {out}")
+if show:
+    plt.show()

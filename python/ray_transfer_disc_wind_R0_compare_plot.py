@@ -4,12 +4,18 @@ wind's launch radius out narrows and deepens the absorption feature (docs/plan_r
 
 Usage:
   python python/ray_transfer_disc_wind_R0_compare_plot.py dat/ray_transfer_disc_wind_spectrum.csv \
-      dat/ray_transfer_disc_wind_R050_spectrum.csv [out.png]
+      dat/ray_transfer_disc_wind_R050_spectrum.csv [out.png] [--show]
 """
 import sys
+
+show = "--show" in sys.argv
+if show:
+    sys.argv.remove("--show")
+
 import csv
 import matplotlib
-matplotlib.use("Agg")
+if not show:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 if len(sys.argv) < 3:
@@ -46,3 +52,5 @@ fig.suptitle("Disc-wind line spectrum: launch radius R0 = 5 vs 50 (same 20x R_ou
 fig.tight_layout()
 fig.savefig(out, dpi=150)
 print(f"Wrote {out}")
+if show:
+    plt.show()

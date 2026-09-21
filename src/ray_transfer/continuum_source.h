@@ -39,7 +39,11 @@ inline T dilution_factor(T r, T R_star)
 // geometry implemented, but contains() is virtual so other shapes can be added later without changing
 // RayTransfer.
 //
-//   contains()      true inside the source.
+//   contains()      true inside the source.  The 4-argument crossing-aware overload (prev_theta = theta
+//                    from the previous step, mirroring RayDestination::reached()) defaults to the
+//                    3-argument pointwise test, which is correct for a genuine volume (SphericalContinuumSource)
+//                    -- a zero-thickness surface (DiscContinuumSource) overrides it, since a pointwise test
+//                    would essentially never land exactly on the surface.
 //   four_velocity()  the source's local rest frame, for redshifting its continuum to the observer;
 //                    defaults to the static (non-rotating) observer (same construction
 //                    SphericalBetaWind::four_velocity uses at zero boost) -- override for other motion.
@@ -59,6 +63,7 @@ public:
     explicit ContinuumSource(T intensity) : intensity(intensity) {}
     virtual ~ContinuumSource() = default;
     virtual bool contains(T r, T theta, T phi) const = 0;
+    virtual bool contains(T r, T theta, T phi, T prev_theta) const { return contains(r, theta, phi); }
     virtual T illumination(T r, T theta, T phi, T spin) const = 0;
 
     virtual void four_velocity(T r, T theta, T phi, T spin, T et[4]) const
@@ -107,6 +112,54 @@ public:
         kerr_metric<T>(g_point, pos_point, spin);
         const T g_illum = sqrt(g_point[0][0] / g_corona[0][0]);   // E_static(source) / E_static(point)
         return this->intensity * dilution_factor<T>(r, R_corona) / (g_illum * g_illum * g_illum);
+    }
+};
+
+// -----------------------------------------------------------------------------------------------
+// DiscContinuumSource: the accretion disc surface itself (theta = pi/2), restricted to an annulus
+// R_in <= r <= R_out, as a continuum source -- e.g. an illuminated/reprocessing patch of disc, distinct
+// from a compact corona. A zero-thickness surface, so contains(r,theta,phi) alone (no prev_theta) is
+// always false; it is only ever "entered" via the crossing-aware overload, exactly as
+// DiscWithISCODestination::reached() detects a disc crossing (ray_destination.h).
+// -----------------------------------------------------------------------------------------------
+template <typename T>
+class DiscContinuumSource : public ContinuumSource<T>
+{
+public:
+    T R_in, R_out;
+
+    DiscContinuumSource(T R_in, T R_out, T intensity) : ContinuumSource<T>(intensity), R_in(R_in), R_out(R_out) {}
+
+    bool contains(T r, T theta, T phi) const override { return false; }
+
+    bool contains(T r, T theta, T phi, T prev_theta) const override
+    {
+        if (r < R_in || r > R_out) return false;
+        const T tl = M_PI_2;
+        return (prev_theta < tl && theta >= tl) || (prev_theta > tl && theta <= tl);
+    }
+
+    // Exact equatorial Keplerian orbit -- disc_velocity_vector (kerr.h) already assumes theta = pi/2, which
+    // holds here exactly (the source only exists on that plane).
+    void four_velocity(T r, T theta, T phi, T spin, T et[4]) const override
+    {
+        disc_velocity_vector<T>(et, r, spin, +1);
+    }
+
+    // Minimal fallback so the class isn't abstract -- not the intended source function for a
+    // RayTransfer application using this source (that would normally use WindSourceMode::PowerLaw
+    // instead, see ray_transfer.h): treats the whole annulus as an effective ring at its mean radius,
+    // same dilution-factor construction as SphericalContinuumSource::illumination.
+    T illumination(T r, T theta, T phi, T spin) const override
+    {
+        const T R_mid = (R_in + R_out) / 2;
+        T pos_disc[4] = {0, R_mid, T(M_PI_2), phi};
+        T pos_point[4] = {0, r, theta, phi};
+        T g_disc[4][4], g_point[4][4];
+        kerr_metric<T>(g_disc, pos_disc, spin);
+        kerr_metric<T>(g_point, pos_point, spin);
+        const T g_illum = sqrt(g_point[0][0] / g_disc[0][0]);
+        return this->intensity * dilution_factor<T>(r, R_mid) / (g_illum * g_illum * g_illum);
     }
 };
 
