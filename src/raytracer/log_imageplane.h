@@ -52,12 +52,15 @@ public:
     // Same photon-initialisation physics as ImagePlane::init_ray (reused via ImagePlane<T>::init_ray),
     // with a guard for the one case ImagePlane's own grid never reaches: exactly x = y = 0, where
     // ImagePlane::init_ray's beta = asin(y/b), b = sqrt(x*x+y*y), is a 0/0. LogImagePlane's linear zone
-    // can legitimately land a ray there, so the origin is nudged by a negligible amount instead.
-    void init_ray(Ray<T>& ray, T x, T y, T D, T incl, T phi0) const;
-    void init_ray(Ray<T>& ray, T x, T y) const;
+    // can legitimately land a ray there, so the origin is nudged by a negligible amount instead. override,
+    // not just hiding, now that ImagePlane::init_ray is virtual -- this guard must be reachable through a
+    // const ImagePlane<T>& reference (e.g. RayTransfer, src/ray_transfer/ray_transfer.h), not just when
+    // called on a LogImagePlane directly.
+    void init_ray(Ray<T>& ray, T x, T y, T D, T incl, T phi0) const override;
+    void init_ray(Ray<T>& ray, T x, T y) const override;
 
-    int get_Nx() const { return m_Nx_total; }   // total columns, 2*Nx+Nlinx
-    int get_Ny() const { return m_Ny_total; }   // total rows,    2*Ny+Nliny
+    int get_Nx() const override { return m_Nx_total; }   // total columns, 2*Nx+Nlinx
+    int get_Ny() const override { return m_Ny_total; }   // total rows,    2*Ny+Nliny
 
     inline int get_x_index(int ix) const { return ix / m_Ny_total; }
     inline int get_y_index(int ix) const { return ix % m_Ny_total; }
@@ -70,12 +73,15 @@ public:
     // weight each ray's contribution by this before summing.
     inline T ray_weight(int ix) const { return m_dx[get_x_index(ix)] * m_dy[get_y_index(ix)]; }
 
-    // Column/row width accessors, by column/row index directly (0..get_Nx()-1 / 0..get_Ny()-1) -- unlike
-    // ray_x/ray_y/ray_weight above, these do NOT take a flat ray index. For consumers that build their own
-    // (column, row) grid loop (e.g. RayTransferGrid, src/ray_transfer/ray_transfer.h) rather than iterating
-    // Raytracer::rays[] directly.
-    inline T dx(int i) const { return m_dx[i]; }
-    inline T dy(int j) const { return m_dy[j]; }
+    // ImagePlane's pixel-center grid query (see imageplane.h), overridden with this class's own log-spaced
+    // grid -- by column/row index directly (0..get_Nx()-1 / 0..get_Ny()-1), unlike ray_x/ray_y/ray_weight
+    // above which take a flat ray index. This is what lets RayTransfer (ray_transfer.h) drive either grid
+    // type through one const ImagePlane<T>& reference with no separate adapter object.
+    T pixel_x(int ix) const override { return m_xc[ix]; }
+    T pixel_y(int iy) const override { return m_yc[iy]; }
+    T pixel_dx(int ix) const override { return m_dx[ix]; }
+    T pixel_dy(int iy) const override { return m_dy[iy]; }
+    T pixel_weight(int ix, int iy) const override { return m_dx[ix] * m_dy[iy]; }
 };
 
 #endif /* LOG_IMAGEPLANE_H_ */

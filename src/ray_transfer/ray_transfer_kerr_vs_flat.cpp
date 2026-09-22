@@ -29,6 +29,7 @@
 using namespace std;
 
 #include "ray_transfer.h"
+#include "../raytracer/log_imageplane.h"
 #include "../include/par_file.h"
 #include "../include/par_args.h"
 
@@ -79,8 +80,8 @@ int main(int argc, char** argv)
     // grid_type: "linear" (default) is ImagePlane's original uniformly-spaced, square x0/xmax/Nx grid;
     // "log" is LogImagePlane's logarithmically-spaced grid (log_x_min/log_x_max/log_Nx/log_Nlinx and the
     // y-equivalents -- left at their x defaults, an un-overridden log grid stays square too, matching this
-    // application's existing convention). See src/raytracer/log_imageplane.h and the RayTransferGrid
-    // comment in ray_transfer.h.
+    // application's existing convention). See src/raytracer/log_imageplane.h and the pixel-grid query
+    // methods in imageplane.h.
     const string grid_type = par_file.get_parameter<string>("grid_type", "linear");
 
     // Optional equatorial disc (ray_transfer_disc_wind.cpp's DiscWithISCODestination, inner edge at the
@@ -111,12 +112,9 @@ int main(int argc, char** argv)
 
     // --- Kerr (Schwarzschild by default) run: sum over the image plane ---
     // Image-plane grid: see ray_transfer_disc_wind.cpp's identical block for the full rationale (in
-    // particular why unique_ptr<own-concrete-type>, never a unique_ptr<ImagePlane<double>>, is required,
-    // and why RayTransfer's two constructor overloads take a plane object rather than a separate grid one).
-    unique_ptr<ImagePlane<double>> linear_plane;
-    unique_ptr<LogImagePlane<double>> log_plane;
-    double x0 = 0, xmax = 0, dx = 0;
-    int Nx = 0;
+    // particular why a single polymorphic unique_ptr<ImagePlane<double>> is safe now that ImagePlane has a
+    // virtual destructor, and why RayTransfer's single constructor takes just this plane object).
+    unique_ptr<ImagePlane<double>> plane;
 
     if (grid_type == "log")
     {
@@ -129,31 +127,24 @@ int main(int argc, char** argv)
         const int log_Ny = par_file.get_parameter<int>("log_Ny", log_Nx);
         const int log_Nliny = par_file.get_parameter<int>("log_Nliny", log_Nlinx);
 
-        log_plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
-                                                         log_y_min, log_y_max, log_Ny, log_Nliny, spin, 0.0);
+        plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
+                                                     log_y_min, log_y_max, log_Ny, log_Nliny, spin, 0.0);
     }
     else
     {
-        x0 = par_file.get_parameter<double>("x0", -1.2 * R_out);
-        xmax = par_file.get_parameter<double>("xmax", 1.2 * R_out);
-        Nx = par_file.get_parameter<int>("Nx", 60);
-        dx = (xmax - x0) / Nx;
+        const double x0 = par_file.get_parameter<double>("x0", -1.2 * R_out);
+        const double xmax = par_file.get_parameter<double>("xmax", 1.2 * R_out);
+        const int Nx = par_file.get_parameter<int>("Nx", 60);
+        const double dx = (xmax - x0) / Nx;
 
-        linear_plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, x0, xmax, dx, spin, 0.0);
+        plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, x0, xmax, dx, spin, 0.0);
     }
 
     SphericalContinuumSource<double> corona(R_corona, I_corona);
     DiscWithISCODestination<double> disc(r_isco, r_out_disc);
     const RayDestination<double>* disc_ptr = (r_out_disc > 0) ? &disc : nullptr;
     if (disc_ptr) cout << "Disc enabled: ISCO at " << r_isco << ", outer edge " << r_out_disc << endl;
-    unique_ptr<RayTransfer<double>> rt_ptr;
-    if (log_plane)
-        rt_ptr = make_unique<RayTransfer<double>>(*log_plane, spin, wind, line, bins, disc_ptr, &corona,
-                                                    source_mode, density_scale);
-    else
-        rt_ptr = make_unique<RayTransfer<double>>(*linear_plane, spin, wind, line, bins, Nx, Nx, x0, dx, x0, dx,
-                                                    disc_ptr, &corona, source_mode, density_scale);
-    RayTransfer<double>& rt = *rt_ptr;
+    RayTransfer<double> rt(*plane, spin, wind, line, bins, disc_ptr, &corona, source_mode, density_scale);
     rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT); symplectic
                                     // step/order left at their defaults (1/PRECISION, order 6)
 
@@ -163,8 +154,7 @@ int main(int argc, char** argv)
     double kerr_tau_max = 0, kerr_tau_sum = 0;
     long kerr_n_thick = 0;
 
-    const int Ny = rt.get_Ny();
-    Nx = rt.get_Nx();   // authoritative dimensions regardless of grid_type (see above)
+    const int Nx = rt.get_Nx(), Ny = rt.get_Ny();
 
     #pragma omp parallel for schedule(dynamic) reduction(+:kerr_continuum_total, n_corona) \
         reduction(max:kerr_tau_max) reduction(+:kerr_tau_sum, kerr_n_thick)
@@ -172,15 +162,15 @@ int main(int argc, char** argv)
     {
         vector<double> line_emission(n_energy), absorption(n_energy);
         vector<double> row_line(n_energy, 0.0), row_total(n_energy, 0.0);
-        const double x = rt.grid_x(ix);
+        const double x = plane->pixel_x(ix);
         for (int iy = 0; iy < Ny; iy++)
         {
-            const double y = rt.grid_y(iy);
+            const double y = plane->pixel_y(iy);
             // Diagnostic-only accumulators (kerr_tau_max/kerr_tau_sum/kerr_n_thick below) are left as
             // plain per-pixel-count statistics regardless of grid_type; only the physically-integrated
-            // flux/continuum sums are area-weighted -- see RayTransferGrid::weight()'s comment
-            // (ray_transfer.h) for why grid_type=linear's weight is fixed at 1, not dx*dy.
-            const double w = rt.grid_weight(ix, iy);
+            // flux/continuum sums are area-weighted -- see ImagePlane::pixel_weight()'s comment
+            // (imageplane.h) for why grid_type=linear's weight is fixed at 1, not pixel_dx*pixel_dy.
+            const double w = plane->pixel_weight(ix, iy);
             double continuum;
             if (rt.trace_pixel(x, y, line_emission, absorption, continuum)) ++n_corona;
             kerr_continuum_total += continuum * w;

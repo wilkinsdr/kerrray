@@ -54,7 +54,6 @@
 #include "../include/array.h"
 #include "../raytracer/raytracer.h"
 #include "../raytracer/imageplane.h"
-#include "../raytracer/log_imageplane.h"
 #include "../raytracer/mino_stepper.h"
 #include "../raytracer/ray_destination.h"
 #include "rtfield.h"
@@ -147,76 +146,6 @@ private:
 };
 
 // -----------------------------------------------------------------------------------------------
-// RayTransferGrid: the pixel grid RayTransfer::run_raytrace() (and any application driving its own pixel
-// loop, e.g. ray_transfer_kerr_vs_flat.cpp) iterates over -- abstracted so a uniform (LinearRayTransferGrid)
-// or logarithmically-spaced (LogRayTransferGrid, backed by LogImagePlane, raytracer/log_imageplane.h) grid
-// can be swapped in without touching RayTransfer's own tracing logic. Mirrors the existing small pluggable-
-// interface pattern in this part of the codebase (RayDestination, ray_destination.h; ContinuumSource,
-// continuum_source.h; RTField, rtfield.h) -- the core Raytracer/ImagePlane classes use no virtuals at all,
-// but their "pluggable behaviour" extension points already do.
-// -----------------------------------------------------------------------------------------------
-template <typename T>
-class RayTransferGrid
-{
-public:
-    virtual ~RayTransferGrid() = default;
-    virtual int Nx() const = 0;
-    virtual int Ny() const = 0;
-    virtual T x(int ix) const = 0;    // pixel-center x coordinate of column ix
-    virtual T y(int iy) const = 0;    // pixel-center y coordinate of row iy
-    virtual T dx(int ix) const = 0;   // column ix's physical width -- for self-describing output only
-    virtual T dy(int iy) const = 0;   // row iy's physical width    -- for self-describing output only
-    // Multiplicative factor applied to a pixel's contribution when summing into an aggregate spectrum
-    // (RayTransfer::run_raytrace's spec_total/spec_line/continuum_total, and ray_transfer_kerr_vs_flat.cpp's
-    // own hand-rolled loop). For the linear grid this is fixed at 1 -- preserving the existing, longstanding
-    // *unweighted* summation convention bit-for-bit, not dx(ix)*dy(iy) -- since redefining it as a true area
-    // would silently rescale every existing linear-grid run's absolute spec_total/continuum_total numbers.
-    // For the log grid it genuinely is the pixel's area dx(ix)*dy(iy), since an unweighted sum over
-    // unequal-area pixels would not be physically meaningful (this was the whole point of
-    // LogImagePlane::ray_weight()).
-    virtual T weight(int ix, int iy) const = 0;
-};
-
-// Uniform grid, pixel centres x0+(ix+0.5)*dx, y0+(iy+0.5)*dy -- exactly RayTransfer's own grid formula
-// before this class existed (docs/plan_ray_transfer.md Sec 5.24-5.27). weight() == 1 always: see the base
-// class comment above for why this is not dx*dy.
-template <typename T>
-class LinearRayTransferGrid : public RayTransferGrid<T>
-{
-    int m_Nx, m_Ny;
-    T m_x0, m_dx, m_y0, m_dy;
-public:
-    LinearRayTransferGrid(int Nx, int Ny, T x0, T dx, T y0, T dy)
-        : m_Nx(Nx), m_Ny(Ny), m_x0(x0), m_dx(dx), m_y0(y0), m_dy(dy) {}
-    int Nx() const override { return m_Nx; }
-    int Ny() const override { return m_Ny; }
-    T x(int ix) const override { return m_x0 + (ix + T(0.5)) * m_dx; }
-    T y(int iy) const override { return m_y0 + (iy + T(0.5)) * m_dy; }
-    T dx(int) const override { return m_dx; }
-    T dy(int) const override { return m_dy; }
-    T weight(int, int) const override { return T(1); }
-};
-
-// Logarithmically-spaced grid, backed by a LogImagePlane the caller constructs and owns (the same object
-// should also be passed as RayTransfer's `plane` argument, upcast to `const ImagePlane<T>&`, so init_ray's
-// physics and this grid's geometry are guaranteed consistent). ray_x/ray_y/ray_weight (log_imageplane.h)
-// take a flat ray index i*get_Ny()+j; the ix*Ny()+iy conversion here reproduces that from (ix, iy).
-template <typename T>
-class LogRayTransferGrid : public RayTransferGrid<T>
-{
-    const LogImagePlane<T>& m_plane;
-public:
-    explicit LogRayTransferGrid(const LogImagePlane<T>& plane) : m_plane(plane) {}
-    int Nx() const override { return m_plane.get_Nx(); }
-    int Ny() const override { return m_plane.get_Ny(); }
-    T x(int ix)  const override { return m_plane.ray_x(ix * m_plane.get_Ny()); }
-    T y(int iy)  const override { return m_plane.ray_y(iy); }
-    T dx(int ix) const override { return m_plane.dx(ix); }
-    T dy(int iy) const override { return m_plane.dy(iy); }
-    T weight(int ix, int iy) const override { return m_plane.ray_weight(ix * m_plane.get_Ny() + iy); }
-};
-
-// -----------------------------------------------------------------------------------------------
 // RayTransfer: backward-traced rays from an ImagePlane through the Kerr spacetime, with the symplectic
 // (Mino-time) stepper driven directly (see the file header).  spin is the physical black-hole spin used
 // to build `plane` (ImagePlane negates it internally for the backward trace; Raytracer::spin is protected,
@@ -255,15 +184,14 @@ template <typename T>
 class RayTransfer
 {
 public:
-    // Nx, Ny, x0, dx, y0, dy define the class's own image-plane pixel grid for run_raytrace() (pixel
-    // centres x0+(ix+0.5)*dx, y0+(iy+0.5)*dy) -- the original, uniform-grid constructor, unchanged from
-    // before LogImagePlane support existed. This is a separate grid from `plane`'s own internal Nx/Ny
-    // (ImagePlane keeps those private, uses a different x0/xmax/dx-derived convention, and raytracer.h/.cpp/
-    // imageplane.h/.cpp are not touched by this library) -- RayTransfer only ever calls plane.init_ray(x, y)
-    // at positions of its own choosing. continuum_map/tau_map/flux_cube/spec_line/spec_total (below) are
-    // allocated here too, sized from Nx/Ny and bins.energy.size(). Internally builds and owns a
-    // LinearRayTransferGrid (below) -- see the LogImagePlane overload just below for why an internal
-    // RayTransferGrid still exists even though it is no longer part of either constructor's public API.
+    // plane defines both the geodesic physics (ImagePlane::init_ray/get_dist/emit_energy/ray_redshift,
+    // all inherited, virtual as of imageplane.h's pixel-grid-query addition) and, via its own
+    // get_Nx()/get_Ny()/pixel_x()/pixel_y()/pixel_dx()/pixel_dy()/pixel_weight() (virtual, imageplane.h),
+    // the pixel grid run_raytrace() iterates over -- a plain ImagePlane gives the original uniform grid,
+    // a LogImagePlane (log_imageplane.h) gives a logarithmically-spaced one, with no separate grid object
+    // needed and no way for the two to disagree about which object defines the image plane (both are
+    // read from the very same `plane` reference). continuum_map/tau_map/flux_cube/spec_line/spec_total
+    // (below) are allocated from plane.get_Nx()/get_Ny() and bins.energy.size().
     //
     // The symplectic integrator's own controls (step, order, far-field max_tstep) are not constructor
     // arguments -- as with Raytracer, they default to the values already in use elsewhere in this library
@@ -271,23 +199,6 @@ public:
     // set_symplectic_step()/set_symplectic_order()/set_max_tstep() below, called before trace_pixel()/
     // run_raytrace() (see emissivity.cpp for the same pattern on Raytracer).
     RayTransfer(const ImagePlane<T>& plane, T spin, const RTField<T>& field,
-                const LineTransition<T>& line, const SpectrumGrid<T>& bins,
-                int Nx, int Ny, T x0, T dx, T y0, T dy,
-                const RayDestination<T>* disc = nullptr, const ContinuumSource<T>* corona = nullptr,
-                WindSourceMode source_mode = WindSourceMode::Density, T density_scale = 1);
-
-    // Logarithmically-spaced grid: takes only a LogImagePlane, no separate grid parameters, since a
-    // LogImagePlane already knows its own grid (get_Nx()/get_Ny()/ray_x()/ray_y()/ray_weight()) -- passing
-    // it once here plays both roles a plain ImagePlane+grid pair would otherwise need (the geodesic physics
-    // via the inherited ImagePlane::init_ray/get_dist/emit_energy/ray_redshift, and the pixel grid), so the
-    // two can never disagree about which object defines the image plane (a real risk with two independent
-    // parameters -- e.g. an ImagePlane paired with a grid built from an unrelated LogImagePlane -- that
-    // this overload eliminates by construction rather than by convention). Internally builds and owns a
-    // LogRayTransferGrid (below): RayTransferGrid still exists as an internal adapter, unifying ImagePlane's
-    // pixel-center/(ix,iy) grid convention (which ImagePlane itself has no public API for at all) and
-    // LogImagePlane's flat-ray-index one into the single shape run_raytrace() drives polymorphically,
-    // without needing two different implementations of run_raytrace() itself.
-    RayTransfer(const LogImagePlane<T>& plane, T spin, const RTField<T>& field,
                 const LineTransition<T>& line, const SpectrumGrid<T>& bins,
                 const RayDestination<T>* disc = nullptr, const ContinuumSource<T>* corona = nullptr,
                 WindSourceMode source_mode = WindSourceMode::Density, T density_scale = 1);
@@ -353,33 +264,15 @@ public:
     T tau_corona_max = 0;
     long n_corona = 0;
 
-    int get_Nx() const { return m_grid->Nx(); }
-    int get_Ny() const { return m_grid->Ny(); }
-
-    // Pixel-center coordinates and cell widths, valid regardless of grid type -- for callers that need to
-    // record where each pixel actually is (e.g. self-describing FITS output), without needing to know or
-    // reconstruct which concrete RayTransferGrid this object built internally.
-    T grid_x(int ix) const { return m_grid->x(ix); }
-    T grid_y(int iy) const { return m_grid->y(iy); }
-    T grid_dx(int ix) const { return m_grid->dx(ix); }
-    T grid_dy(int iy) const { return m_grid->dy(iy); }
-    // The same per-pixel area-weighting factor run_raytrace() applies internally (see RayTransferGrid's
-    // weight() comment) -- for callers driving their own pixel loop over trace_pixel() directly instead of
-    // run_raytrace() (e.g. ray_transfer_kerr_vs_flat.cpp).
-    T grid_weight(int ix, int iy) const { return m_grid->weight(ix, iy); }
+    int get_Nx() const { return m_plane.get_Nx(); }
+    int get_Ny() const { return m_plane.get_Ny(); }
 
 private:
-    // Shared tail of both constructors: allocates continuum_map/tau_map/flux_cube/spec_line/spec_total
-    // from m_grid->Nx()/Ny(), once m_grid has been built by whichever constructor ran.
-    void init_arrays();
-
     const ImagePlane<T>& m_plane;
     T m_spin;
     const RTField<T>& m_field;
     LineTransition<T> m_line;
     SpectrumGrid<T> m_bins;
-    std::unique_ptr<RayTransferGrid<T>> m_grid;   // owned; built by whichever constructor ran (safe: unlike
-                                                   // ImagePlane, RayTransferGrid has a virtual destructor)
     const RayDestination<T>* m_disc;
     const ContinuumSource<T>* m_corona;
     int m_order;

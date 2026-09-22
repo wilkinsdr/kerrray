@@ -57,9 +57,7 @@ int main()
         SphericalContinuumSource<double> corona(R_corona, I_corona);
         LineTransition<double> line{1.0, 0.01, 0.2};
         SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(0.9, 1.1, 3);
-        // Nx/Ny/x0/dx/y0/dy: this test drives trace_pixel() directly on its own x/y loop below, not
-        // run_raytrace()'s grid, so these are unused placeholders.
-        RayTransfer<double> rt(plane, spin, wind, line, bins, 1, 1, 0.0, 1.0, 0.0, 1.0, nullptr, &corona);
+        RayTransfer<double> rt(plane, spin, wind, line, bins, nullptr, &corona);
 
         int n_hit = 0;
         double max_dev = 0;
@@ -95,8 +93,7 @@ int main()
         DiscWithISCODestination<double> disc(r_isco, r_out_disc);
         LineTransition<double> line{1.0, 0.01, 0.2};
         SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(0.9, 1.1, 3);
-        // Nx/Ny/x0/dx/y0/dy: unused placeholders, as above -- this test also drives trace_pixel() directly.
-        RayTransfer<double> rt(plane, spin, wind, line, bins, 1, 1, 0.0, 1.0, 0.0, 1.0, &disc, &corona);
+        RayTransfer<double> rt(plane, spin, wind, line, bins, &disc, &corona);
 
         int n_hit = 0, n_blocked = 0, n_other = 0;
         vector<double> em, ab;

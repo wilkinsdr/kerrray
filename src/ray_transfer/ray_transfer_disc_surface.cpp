@@ -24,6 +24,7 @@
 using namespace std;
 
 #include "ray_transfer.h"
+#include "../raytracer/log_imageplane.h"
 #include "../include/par_file.h"
 #include "../include/par_args.h"
 #include "../include/fits_output.h"
@@ -51,7 +52,7 @@ int main(int argc, char** argv)
     const double plane_phi0 = par_file.get_parameter<double>("plane_phi0", 0);
     // grid_type: "linear" (default) is ImagePlane's original uniformly-spaced (x0/xmax/Nx/y0/ymax/Ny) grid;
     // "log" is LogImagePlane's logarithmically-spaced grid (log_x_min/log_x_max/log_Nx/log_Nlinx and the
-    // y-equivalents). See src/raytracer/log_imageplane.h and the RayTransferGrid comment in ray_transfer.h.
+    // y-equivalents). See src/raytracer/log_imageplane.h and the pixel-grid query methods in imageplane.h.
     const string grid_type = par_file.get_parameter<string>("grid_type", "linear");
     const double symp_step = par_file.get_parameter<double>("symp_step", -1);
     const int symp_order = par_file.get_parameter<int>("symp_order", 6);
@@ -109,12 +110,9 @@ int main(int argc, char** argv)
     cout << "Wind source function: " << source_mode_str << endl;
 
     // Image-plane grid: see ray_transfer_disc_wind.cpp's identical block for the full rationale (in
-    // particular why unique_ptr<own-concrete-type>, never a unique_ptr<ImagePlane<double>>, is required,
-    // and why RayTransfer's two constructor overloads take a plane object rather than a separate grid one).
-    unique_ptr<ImagePlane<double>> linear_plane;
-    unique_ptr<LogImagePlane<double>> log_plane;
-    double x0 = 0, xmax = 0, dx = 0, y0 = 0, dy = 0;
-    int Nx = 0, Ny = 0;
+    // particular why a single polymorphic unique_ptr<ImagePlane<double>> is safe now that ImagePlane has a
+    // virtual destructor, and why RayTransfer's single constructor takes just this plane object).
+    unique_ptr<ImagePlane<double>> plane;
 
     if (grid_type == "log")
     {
@@ -127,21 +125,21 @@ int main(int argc, char** argv)
         const int log_Ny = par_file.get_parameter<int>("log_Ny", log_Nx);
         const int log_Nliny = par_file.get_parameter<int>("log_Nliny", log_Nlinx);
 
-        log_plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
-                                                         log_y_min, log_y_max, log_Ny, log_Nliny, spin, plane_phi0);
+        plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
+                                                     log_y_min, log_y_max, log_Ny, log_Nliny, spin, plane_phi0);
     }
     else
     {
-        x0 = par_file.get_parameter<double>("x0");
-        xmax = par_file.get_parameter<double>("xmax");
-        Nx = par_file.get_parameter<int>("Nx");
-        y0 = par_file.get_parameter<double>("y0", x0);
+        const double x0 = par_file.get_parameter<double>("x0");
+        const double xmax = par_file.get_parameter<double>("xmax");
+        const int Nx = par_file.get_parameter<int>("Nx");
+        const double y0 = par_file.get_parameter<double>("y0", x0);
         const double ymax = par_file.get_parameter<double>("ymax", xmax);
-        Ny = par_file.get_parameter<int>("Ny", Nx);
-        dx = (xmax - x0) / Nx;
-        dy = (ymax - y0) / Ny;
+        const int Ny = par_file.get_parameter<int>("Ny", Nx);
+        const double dx = (xmax - x0) / Nx;
+        const double dy = (ymax - y0) / Ny;
 
-        linear_plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
+        plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
     }
 
     DiscSurface<double> gas(R_in, R_out, z_min, z_max, density_mode, n0, density_index);
@@ -150,20 +148,13 @@ int main(int argc, char** argv)
     LineTransition<double> line{line_energy, doppler_width, kappa0};
     SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(energy_min, energy_max, n_energy);
 
-    unique_ptr<RayTransfer<double>> rt_ptr;
-    if (log_plane)
-        rt_ptr = make_unique<RayTransfer<double>>(*log_plane, spin, gas, line, bins, &disc, &corona,
-                                                    source_mode, density_scale);
-    else
-        rt_ptr = make_unique<RayTransfer<double>>(*linear_plane, spin, gas, line, bins, Nx, Ny, x0, dx, y0, dy,
-                                                    &disc, &corona, source_mode, density_scale);
-    RayTransfer<double>& rt = *rt_ptr;
+    RayTransfer<double> rt(*plane, spin, gas, line, bins, &disc, &corona, source_mode, density_scale);
     rt.set_symplectic_step(symp_step);
     rt.set_symplectic_order(symp_order);
     rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT)
     rt.set_powerlaw_source(powerlaw_norm, powerlaw_ref_r, powerlaw_index);
 
-    Nx = rt.get_Nx(); Ny = rt.get_Ny();   // authoritative dimensions regardless of grid_type (see above)
+    const int Nx = rt.get_Nx(), Ny = rt.get_Ny();
 
     rt.run_raytrace();
     cout << rt.n_corona << " / " << (Nx * Ny) << " pixels hit the disc's emitting annulus" << endl;
@@ -226,7 +217,7 @@ int main(int argc, char** argv)
     // ray_transfer_disc_wind.cpp's identical block for the rationale.
     {
         vector<double> xcol(Nx), dxcol(Nx);
-        for (int ix = 0; ix < Nx; ix++) { xcol[ix] = rt.grid_x(ix); dxcol[ix] = rt.grid_dx(ix); }
+        for (int ix = 0; ix < Nx; ix++) { xcol[ix] = plane->pixel_x(ix); dxcol[ix] = plane->pixel_dx(ix); }
         char* ttype[] = {(char*)"X", (char*)"DX"};
         char* tform[] = {(char*)COL_FLOAT64, (char*)COL_FLOAT64};
         char* tunit[] = {(char*)"Rg", (char*)"Rg"};
@@ -237,7 +228,7 @@ int main(int argc, char** argv)
     }
     {
         vector<double> ycol(Ny), dycol(Ny);
-        for (int iy = 0; iy < Ny; iy++) { ycol[iy] = rt.grid_y(iy); dycol[iy] = rt.grid_dy(iy); }
+        for (int iy = 0; iy < Ny; iy++) { ycol[iy] = plane->pixel_y(iy); dycol[iy] = plane->pixel_dy(iy); }
         char* ttype[] = {(char*)"Y", (char*)"DY"};
         char* tform[] = {(char*)COL_FLOAT64, (char*)COL_FLOAT64};
         char* tunit[] = {(char*)"Rg", (char*)"Rg"};

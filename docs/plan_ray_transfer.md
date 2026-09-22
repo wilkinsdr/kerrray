@@ -1535,3 +1535,183 @@ pre-`grid_type` form. Re-ran `ray_transfer_disc_wind` with the previously-record
 configuration (`log_x_min=1, log_x_max=20, log_Nx=12, log_Nlinx=4`) and a small linear one: identical
 `GRIDTYPE`/`CONTINUUM` max/spectrum values to the pre-redesign runs recorded in Sec 5.33, confirming this
 was a pure API/plumbing simplification with no change to any computed result.
+
+## 5.35  Revisited again: `RayTransferGrid` removed -- `ImagePlane` grows a virtual pixel-grid interface
+
+Asked once more to reconsider: even with Sec 5.34's two-overload split, `RayTransfer` still needed
+`RayTransferGrid`/`LinearRayTransferGrid`/`LogRayTransferGrid` as an adapter, purely because `ImagePlane` and
+`LogImagePlane` shared no common API for "how many pixels / where's pixel `(ix,iy)` / what's its weight" --
+`ImagePlane`'s `Nx`/`Ny` were private with no getter, its own `ray_x`/`ray_y` used a different ("grid
+point," not "pixel center") convention, and none of it was `virtual`, so `LogImagePlane` couldn't override
+it. Asked to expose the required members on `ImagePlane` directly instead, so `RayTransfer` could go back to
+one constructor taking just `const ImagePlane<T>& plane` -- no separate grid object, no two overloads --
+matching `Raytracer`'s "one ray-source object" philosophy exactly, and finally removing the adapter
+entirely.
+
+**This explicitly reverses the "`imageplane.h`/`imageplane.cpp` are off-limits" constraint** stated in Sec 1
+and followed through Secs 5.33-5.34 (the reason `LogImagePlane` was built by inheritance rather than
+modification in the first place). The trade-off, discussed before committing: this removes ~70 lines of
+adapter code and produces a materially simpler end state, at the cost of adding a vtable to the most
+widely-used class in the project (`ImagePlane`, consumed by `imageplane_disc_image*`, every `caustic_*`
+tool, and more, none of which have anything to do with `RayTransfer`). The changes are purely additive to
+`imageplane.h` (new methods only; no existing method, member, or behaviour changed) to keep that blast
+radius as small as possible, and every other `ImagePlane` consumer was rebuilt and spot-checked rather than
+assuming additive changes are automatically safe (see Verification).
+
+**A real, independent bug found while researching this change.** `RayTransfer` stores `const ImagePlane<T>&
+m_plane` and calls `m_plane.init_ray(ray, x, y)` in `trace_pixel()`. Since `ImagePlane::init_ray` was not
+virtual, that call resolved by `m_plane`'s *static* type (`ImagePlane<T>`) at compile time, never by its
+dynamic type -- so even with Sec 5.34's already-shipped `LogImagePlane`-only constructor, every
+`trace_pixel()` call on a `RayTransfer` built from a `LogImagePlane` was silently invoking
+`ImagePlane::init_ray`, *not* `LogImagePlane::init_ray`'s origin guard. A log grid whose `log_Nlinx`/
+`log_Nliny` are both odd (producing an exact `(0,0)` pixel -- no example par file or prior test
+configuration happened to use that, which is exactly why it hadn't surfaced) would hit the unguarded
+`asin(y/b)` `0/0` there; `trace_pixel`'s own `isfinite` check caught it and dropped that one pixel rather
+than corrupting the run, but it was still wrong. Making `init_ray` virtual (needed anyway, for the same
+reason as the grid-query methods) is the fix, and is included below.
+
+**Design: `src/raytracer/imageplane.h`, purely additive.** New virtual methods, reusing the existing
+private `Nx, Ny, m_x0, m_dx, m_y0, m_dy` members with a second formula family -- the "pixel center"
+convention `x0+(ix+0.5)*dx` that `RayTransfer`/`RayTransferGrid` always used, distinct from (and additional
+to) the existing `ray_x`/`get_x_index` "grid point" convention already in this file, which is untouched
+(still used by `CausticBundle` and the `caustic_*` code paths):
+```cpp
+virtual ~ImagePlane() = default;   // required once this class has any virtual method; also makes it safe
+                                    // to hold a LogImagePlane via unique_ptr<ImagePlane<T>>
+virtual int get_Nx() const { return (int)std::round((m_xmax - m_x0) / m_dx); }
+virtual int get_Ny() const { return (int)std::round((m_ymax - m_y0) / m_dy); }
+virtual T pixel_x(int ix) const { return m_x0 + (ix + T(0.5)) * m_dx; }
+virtual T pixel_y(int iy) const { return m_y0 + (iy + T(0.5)) * m_dy; }
+virtual T pixel_dx(int ix) const { return m_dx; }
+virtual T pixel_dy(int iy) const { return m_dy; }
+virtual T pixel_weight(int, int) const { return T(1); }   // matches every existing RayTransfer consumer's
+                                                            // longstanding unweighted-sum convention
+virtual void init_ray(Ray<T>& ray, T x, T y, T D, T incl, T phi0) const;
+virtual void init_ray(Ray<T>& ray, T x, T y) const { init_ray(ray, x, y, D, incl * M_PI / 180, phi0); }
+```
+No changes to `imageplane.cpp` -- `virtual` only needs to appear on the header declaration. Virtual dispatch
+during `ImagePlane`'s own constructor (`init_image_plane`'s call to `init_ray`, including when it runs as
+the base subobject of a `LogImagePlane` under construction) is unaffected: C++ guarantees virtual calls made
+from within a base class's own constructor resolve to the base class's own version regardless, exactly the
+behaviour `LogImagePlane`'s "build a throwaway linear fill, then overwrite it" constructor already relies
+on.
+
+**`get_Nx()`/`get_Ny()` deliberately do not return the private `Nx`/`Ny` members.** Those are computed by
+`ImagePlane`'s constructor via the "grid point" formula `Nx=((xmax-x0)/dx)+1` -- one *more* than the
+pixel-center count, since it counts inclusive-endpoint points, not cells. Reusing them here was tried first
+and found to be a real bug (see Verification): it silently traces one extra, out-of-range row/column,
+shifting every aggregate sum by a few percent near a sharply-varying line. The pixel-center count is instead
+re-derived directly from `(xmax-x0)/dx`, rounded (not truncated: `dx` is itself `(xmax-x0)/N` for whatever
+`N` the caller intended, so the round trip can land a ULP either side of the integer -- `round()` recovers
+`N` exactly; truncation could silently be off by one).
+
+**`src/raytracer/log_imageplane.h`**: `get_Nx()`/`get_Ny()` gain `override` (bodies unchanged); `dx(int
+i)`/`dy(int j)` (added only for `LogRayTransferGrid`'s benefit in Sec 5.33) removed and replaced with actual
+overrides, reusing the same private `m_xc`/`m_yc`/`m_dx`/`m_dy` members:
+```cpp
+T pixel_x(int ix) const override { return m_xc[ix]; }
+T pixel_y(int iy) const override { return m_yc[iy]; }
+T pixel_dx(int ix) const override { return m_dx[ix]; }
+T pixel_dy(int iy) const override { return m_dy[iy]; }
+T pixel_weight(int ix, int iy) const override { return m_dx[ix] * m_dy[iy]; }
+```
+Both `init_ray` overloads gain `override` (bodies unchanged -- they already implement the origin guard
+correctly; the fix is that they're now genuinely reachable through a `const ImagePlane<T>&` reference).
+Everything else unchanged.
+
+**`src/ray_transfer/ray_transfer.h`/`.cpp`**: `RayTransferGrid`/`LinearRayTransferGrid`/`LogRayTransferGrid`
+deleted entirely, along with the `#include "../raytracer/log_imageplane.h"` -- `RayTransfer` no longer needs
+to know `LogImagePlane` exists at all. Back to one constructor, identical in shape to the version from
+before any `grid_type` work existed:
+```cpp
+RayTransfer(const ImagePlane<T>& plane, T spin, const RTField<T>& field,
+            const LineTransition<T>& line, const SpectrumGrid<T>& bins,
+            const RayDestination<T>* disc = nullptr, const ContinuumSource<T>* corona = nullptr,
+            WindSourceMode source_mode = WindSourceMode::Density, T density_scale = 1);
+```
+`m_grid` member removed; only `m_plane` remains. `get_Nx()`/`get_Ny()` become
+`{ return m_plane.get_Nx(); }` / `{ return m_plane.get_Ny(); }`. The Sec 5.34 `grid_x`/`grid_y`/`grid_dx`/
+`grid_dy`/`grid_weight` pass-throughs are removed -- redundant now that every caller already holds its own
+`plane` reference/pointer and can call `plane->pixel_x(ix)` etc. directly. `run_raytrace()`'s
+`m_grid->Nx()/Ny()/x(ix)/y(iy)/weight(ix,iy)` become `m_plane.get_Nx()/get_Ny()/pixel_x(ix)/pixel_y(iy)/
+pixel_weight(ix,iy)`; the two-constructor `init_arrays()` helper folds back into the single constructor
+body. `trace_pixel()` is untouched either way (still calls `m_plane.init_ray(...)`, now correctly virtual).
+
+**Applications**: `ray_transfer_disc_wind.cpp`/`ray_transfer_disc_surface.cpp`/`ray_transfer_kerr_vs_flat.cpp`
+go back to one `plane` variable and one stack-local `rt`. The virtual destructor on `ImagePlane` makes it
+safe to hold *either* concrete type in one polymorphic `unique_ptr<ImagePlane<double>>` (the Sec 5.34
+two-separate-concrete-`unique_ptr`s workaround is no longer needed), and with only one `RayTransfer`
+constructor, `unique_ptr<RayTransfer<T>>` is no longer needed either:
+```cpp
+unique_ptr<ImagePlane<double>> plane;
+if (grid_type == "log")
+    plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
+                                                 log_y_min, log_y_max, log_Ny, log_Nliny, spin, plane_phi0);
+else
+    plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
+
+RayTransfer<double> rt(*plane, spin, wind, line, bins, &disc, &corona, source_mode, density_scale);
+```
+`rt.grid_x(ix)`/`grid_y(iy)`/`grid_dx(ix)`/`grid_dy(iy)`/`grid_weight(ix,iy)` call sites (the `XGRID`/
+`YGRID` FITS writer in the two `run_raytrace()` apps, and the hand-rolled loop in
+`ray_transfer_kerr_vs_flat.cpp`) become `plane->pixel_x(ix)`/`pixel_y(iy)`/`pixel_dx(ix)`/`pixel_dy(iy)`/
+`pixel_weight(ix,iy)`. `rt.get_Nx()`/`get_Ny()` call sites are unchanged. Each of the three `.cpp` files
+gains an explicit `#include "../raytracer/log_imageplane.h"` (no longer pulled in transitively through
+`ray_transfer.h`).
+
+**Build wiring**: `ray_transfer` library drops `log_imageplane` from its link line (no longer references
+`LogImagePlane` at all); `ray_transfer_disc_wind`, `ray_transfer_disc_surface`, `ray_transfer_kerr_vs_flat`
+each add `log_imageplane` directly. `ray_transfer_grid_test` (now testing `ImagePlane`'s/`LogImagePlane`'s
+virtual interface directly rather than the removed adapter classes) also links `log_imageplane` directly,
+since it's no longer pulled in transitively via `ray_transfer`.
+
+**Tests**: `ray_transfer_grid_test.cpp` rewritten -- same four checks, re-pointed at the new virtual methods
+directly instead of `LinearRayTransferGrid`/`LogRayTransferGrid`, plus two new ones: (1b) a regression test
+for the `get_Nx()`/`get_Ny()` off-by-one bug (below) across several non-trivial `N` and a non-round
+`R_out=37.0`; and a regression test for the `init_ray` dispatch bug, forcing an exact `(0,0)` pixel
+(`log_Nlinx=log_Nliny=1`) and confirming both `plane.init_ray(ray,0,0,...)` called through a `const
+ImagePlane<T>&` reference, and `rt.trace_pixel(0,0,...)`, produce finite results.
+`ray_transfer_disc_wind_test.cpp`'s two `RayTransfer` constructions drop the six placeholder grid scalars
+that no longer match any constructor overload.
+
+**Bug found by verification: `get_Nx()`/`get_Ny()` off-by-one.** The mandatory `git stash`-based
+backward-compat check (comparing `ray_transfer_kerr_vs_flat`'s output CSV old vs new) showed
+`kerr_residual` differing by up to 0.83% -- far too large for floating-point summation-order noise, and the
+unaffected `flat_residual` column (computed without `RayTransfer` at all) was identical, which was the key
+diagnostic clue pointing at something in the new grid-query path specifically. Root cause: `get_Nx()`/
+`get_Ny()` initially reused the existing private `Nx`/`Ny` members (the "grid point" count, one more than
+the "pixel center" count `pixel_x`/`pixel_y` and the historical `RayTransferGrid` convention actually need),
+silently tracing a 61x61 grid instead of 60x60 for `ray_transfer_kerr_vs_flat.par`'s `Nx=60`. Fixed as shown
+above (re-derive via rounded division rather than reusing `Nx`/`Ny`), with the regression test described
+above added to catch any recurrence.
+
+**Verification.**
+1. Full project rebuild, not just `ray_transfer`-related targets -- the real new risk surface is the vtable
+   added to `ImagePlane`. Every consumer (`imageplane_disc_image*`, every `caustic_*` tool,
+   `trace_rays_imageplane`, `caustic_3d_test`, `caustic_bundle_test`, `caustic_ent_test`,
+   `integrator_dest_test`, `integrator_sweep`) rebuilt clean; `caustic_bundle_test`/`integrator_dest_test`
+   re-run and still passing, confirming `sizeof(ImagePlane)` changing (new vtable pointer) is harmless for
+   them.
+2. `log_imageplane_test`, the rewritten `ray_transfer_grid_test`, `ray_transfer_disc_wind_test` all pass,
+   including the two new regression tests above.
+3. Full `git stash`-based backward-compatibility check across all three `ray_transfer` applications at
+   `OMP_NUM_THREADS=1`: stash, rebuild pre-change code, run all three on their existing linear par files,
+   restore, rebuild, re-run. After the `get_Nx()`/`get_Ny()` fix above: `ray_transfer_kerr_vs_flat.csv`,
+   `ray_transfer_disc_wind`'s CSV and every FITS HDU (including `XGRID`/`YGRID` tables and all header
+   keywords), and `ray_transfer_disc_surface`'s CSV and every FITS HDU/table/header keyword are all
+   bit-identical old vs new.
+4. `grid_type = log` smoke test (`log_x_min=1, log_x_max=20|30, log_Nx=12, log_Nlinx=4`, a 28x28 grid) on
+   all three applications with the final code: `ray_transfer_disc_wind`'s `CONTINUUM` max
+   (`1.2650381150814791`) and spectrum `total_flux` (`1.47079052e+01`) match the values recorded in Sec 5.33
+   exactly; `ray_transfer_kerr_vs_flat` gets `162/784` corona hits (consistent scaling from the `99/3600`
+   recorded in Sec 5.33 at the finer linear resolution); `ray_transfer_disc_surface`'s `CONTINUUM`/`TAU`/
+   `FLUX` extensions are all finite. `GRIDTYPE`/`LOGXMIN`/`LOGXMAX`/`LOGNX`/`LOGNLINX` FITS keywords correct
+   in all cases -- confirming this redesign, like Sec 5.34's, is a pure refactor with no change to any
+   computed result.
+
+**Out of scope (flagged, not fixed here).** `Raytracer<T>` itself (not `ImagePlane`) has no virtual
+destructor either, and `src/tests/integrator_sweep.cpp` already deletes `PointSource<double>`/
+`ImagePlane<double>` objects through a `Raytracer<double>*` base pointer (`make_source()`'s return value,
+later `delete`d in several places) -- technically undefined behaviour today, currently harmless only because
+neither class owns any extra resources beyond what `~Raytracer()` itself frees. Pre-existing, unrelated to
+`RayTransfer`, surfaced during this same research but not touched by this change.

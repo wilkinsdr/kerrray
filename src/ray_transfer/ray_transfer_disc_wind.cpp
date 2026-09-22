@@ -21,6 +21,7 @@
 using namespace std;
 
 #include "ray_transfer.h"
+#include "../raytracer/log_imageplane.h"
 #include "../include/par_file.h"
 #include "../include/par_args.h"
 #include "../include/fits_output.h"
@@ -49,7 +50,7 @@ int main(int argc, char** argv)
     // grid_type: "linear" (default) is ImagePlane's original uniformly-spaced (x0/xmax/Nx/y0/ymax/Ny) grid;
     // "log" is LogImagePlane's logarithmically-spaced grid (log_x_min/log_x_max/log_Nx/log_Nlinx and the
     // y-equivalents), which concentrates resolution near the optical axis while covering a wide field of
-    // view cheaply. See src/raytracer/log_imageplane.h and the RayTransferGrid comment in ray_transfer.h.
+    // view cheaply. See src/raytracer/log_imageplane.h and the pixel-grid query methods in imageplane.h.
     const string grid_type = par_file.get_parameter<string>("grid_type", "linear");
     const double symp_step = par_file.get_parameter<double>("symp_step", -1);
     const int symp_order = par_file.get_parameter<int>("symp_order", 6);
@@ -110,18 +111,12 @@ int main(int argc, char** argv)
          << endl;
 
     // Image-plane grid: "linear" (ImagePlane, x0/xmax/Nx/y0/ymax/Ny) or "log" (LogImagePlane,
-    // log_x_min/log_x_max/log_Nx/log_Nlinx and the y-equivalents). Held by a unique_ptr of its own
-    // *concrete* type (never upcast to a unique_ptr<ImagePlane<double>>): ImagePlane<T> has no virtual
-    // destructor (raytracer.h/imageplane.h are not touched by this project), so destructing a LogImagePlane
-    // through a base-typed unique_ptr would be undefined behaviour (only ~ImagePlane() would run).
-    // RayTransfer itself is constructed below via whichever of its two constructor overloads matches the
-    // concrete plane type actually built here -- the ImagePlane overload also takes the linear grid's
-    // Nx/Ny/x0/dx/y0/dy directly (unchanged from before grid_type existed); the LogImagePlane overload
-    // needs no separate grid parameters at all, since a LogImagePlane already knows its own grid.
-    unique_ptr<ImagePlane<double>> linear_plane;
-    unique_ptr<LogImagePlane<double>> log_plane;
-    double x0 = 0, xmax = 0, dx = 0, y0 = 0, dy = 0;
-    int Nx = 0, Ny = 0;
+    // log_x_min/log_x_max/log_Nx/log_Nlinx and the y-equivalents). Held by one polymorphic
+    // unique_ptr<ImagePlane<double>> -- safe for either concrete type, since ImagePlane now has a virtual
+    // destructor (imageplane.h) -- rather than two separately-typed unique_ptrs. RayTransfer takes just
+    // this one plane object: its own get_Nx()/get_Ny()/pixel_x()/pixel_y()/pixel_weight() (virtual,
+    // imageplane.h) supply the pixel grid, so there is no separate grid parameter/object to keep in sync.
+    unique_ptr<ImagePlane<double>> plane;
 
     if (grid_type == "log")
     {
@@ -134,21 +129,21 @@ int main(int argc, char** argv)
         const int log_Ny = par_file.get_parameter<int>("log_Ny", log_Nx);
         const int log_Nliny = par_file.get_parameter<int>("log_Nliny", log_Nlinx);
 
-        log_plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
-                                                         log_y_min, log_y_max, log_Ny, log_Nliny, spin, plane_phi0);
+        plane = make_unique<LogImagePlane<double>>(dist, incl, log_x_min, log_x_max, log_Nx, log_Nlinx,
+                                                     log_y_min, log_y_max, log_Ny, log_Nliny, spin, plane_phi0);
     }
     else
     {
-        x0 = par_file.get_parameter<double>("x0");
-        xmax = par_file.get_parameter<double>("xmax");
-        Nx = par_file.get_parameter<int>("Nx");
-        y0 = par_file.get_parameter<double>("y0", x0);
+        const double x0 = par_file.get_parameter<double>("x0");
+        const double xmax = par_file.get_parameter<double>("xmax");
+        const int Nx = par_file.get_parameter<int>("Nx");
+        const double y0 = par_file.get_parameter<double>("y0", x0);
         const double ymax = par_file.get_parameter<double>("ymax", xmax);
-        Ny = par_file.get_parameter<int>("Ny", Nx);
-        dx = (xmax - x0) / Nx;
-        dy = (ymax - y0) / Ny;
+        const int Ny = par_file.get_parameter<int>("Ny", Nx);
+        const double dx = (xmax - x0) / Nx;
+        const double dy = (ymax - y0) / Ny;
 
-        linear_plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
+        plane = make_unique<ImagePlane<double>>(dist, incl, x0, xmax, dx, y0, ymax, dy, spin, plane_phi0);
     }
 
     unique_ptr<RTField<double>> wind_ptr;
@@ -172,14 +167,7 @@ int main(int argc, char** argv)
     LineTransition<double> line{line_energy, doppler_width, kappa0};
     SpectrumGrid<double> bins = SpectrumGrid<double>::linspace(energy_min, energy_max, n_energy);
 
-    unique_ptr<RayTransfer<double>> rt_ptr;
-    if (log_plane)
-        rt_ptr = make_unique<RayTransfer<double>>(*log_plane, spin, wind, line, bins, &disc, &corona,
-                                                    source_mode, density_scale);
-    else
-        rt_ptr = make_unique<RayTransfer<double>>(*linear_plane, spin, wind, line, bins, Nx, Ny, x0, dx, y0, dy,
-                                                    &disc, &corona, source_mode, density_scale);
-    RayTransfer<double>& rt = *rt_ptr;
+    RayTransfer<double> rt(*plane, spin, wind, line, bins, &disc, &corona, source_mode, density_scale);
     rt.set_symplectic_step(symp_step);
     rt.set_symplectic_order(symp_order);
     rt.set_max_tstep(max_tstep);   // far-field cap on the coordinate-time step (default MAXDT)
@@ -190,7 +178,7 @@ int main(int argc, char** argv)
     // accumulated over the *whole* backward-traced ray (near side, periapsis, far side alike,
     // ray_transfer.cpp) and never reset, tau_map[ix][iy] is genuinely the total wind optical depth along
     // that line of sight, not just a per-step or per-leg value (docs/plan_ray_transfer.md Sec 5.15-5.16).
-    Nx = rt.get_Nx(); Ny = rt.get_Ny();   // authoritative dimensions regardless of grid_type (see above)
+    const int Nx = rt.get_Nx(), Ny = rt.get_Ny();
 
     rt.run_raytrace();
     cout << rt.n_corona << " / " << (Nx * Ny) << " pixels hit the corona" << endl;
@@ -260,7 +248,7 @@ int main(int argc, char** argv)
     // keywords). Binary table extensions, same technique as e.g. disc_ent_line_rbin.cpp's "DISC" table.
     {
         vector<double> xcol(Nx), dxcol(Nx);
-        for (int ix = 0; ix < Nx; ix++) { xcol[ix] = rt.grid_x(ix); dxcol[ix] = rt.grid_dx(ix); }
+        for (int ix = 0; ix < Nx; ix++) { xcol[ix] = plane->pixel_x(ix); dxcol[ix] = plane->pixel_dx(ix); }
         char* ttype[] = {(char*)"X", (char*)"DX"};
         char* tform[] = {(char*)COL_FLOAT64, (char*)COL_FLOAT64};
         char* tunit[] = {(char*)"Rg", (char*)"Rg"};
@@ -271,7 +259,7 @@ int main(int argc, char** argv)
     }
     {
         vector<double> ycol(Ny), dycol(Ny);
-        for (int iy = 0; iy < Ny; iy++) { ycol[iy] = rt.grid_y(iy); dycol[iy] = rt.grid_dy(iy); }
+        for (int iy = 0; iy < Ny; iy++) { ycol[iy] = plane->pixel_y(iy); dycol[iy] = plane->pixel_dy(iy); }
         char* ttype[] = {(char*)"Y", (char*)"DY"};
         char* tform[] = {(char*)COL_FLOAT64, (char*)COL_FLOAT64};
         char* tunit[] = {(char*)"Rg", (char*)"Rg"};

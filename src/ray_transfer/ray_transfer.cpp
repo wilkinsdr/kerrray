@@ -128,41 +128,17 @@ static T bisect_boundary(const MinoState<T>& q_prev, T step, T a, T k, T h, int 
 template <typename T>
 RayTransfer<T>::RayTransfer(const ImagePlane<T>& plane, T spin, const RTField<T>& field,
                               const LineTransition<T>& line, const SpectrumGrid<T>& bins,
-                              int Nx, int Ny, T x0, T dx, T y0, T dy,
                               const RayDestination<T>* disc, const ContinuumSource<T>* corona,
                               WindSourceMode source_mode, T density_scale)
     : m_plane(plane), m_spin(spin), m_field(field), m_line(line), m_bins(bins),
-      m_grid(std::make_unique<LinearRayTransferGrid<T>>(Nx, Ny, x0, dx, y0, dy)),
       m_disc(disc), m_corona(corona),
       m_order(6), m_step(-1),
       m_max_tstep(MAXDT), m_max_phistep(MAXDPHI), m_maxtstep_rlim(MAXDT_RLIM),
       m_source_mode((corona != nullptr) ? source_mode : WindSourceMode::Density),
       m_density_scale(density_scale)
-{
-    init_arrays();
-}
-
-template <typename T>
-RayTransfer<T>::RayTransfer(const LogImagePlane<T>& plane, T spin, const RTField<T>& field,
-                              const LineTransition<T>& line, const SpectrumGrid<T>& bins,
-                              const RayDestination<T>* disc, const ContinuumSource<T>* corona,
-                              WindSourceMode source_mode, T density_scale)
-    : m_plane(plane), m_spin(spin), m_field(field), m_line(line), m_bins(bins),
-      m_grid(std::make_unique<LogRayTransferGrid<T>>(plane)),
-      m_disc(disc), m_corona(corona),
-      m_order(6), m_step(-1),
-      m_max_tstep(MAXDT), m_max_phistep(MAXDPHI), m_maxtstep_rlim(MAXDT_RLIM),
-      m_source_mode((corona != nullptr) ? source_mode : WindSourceMode::Density),
-      m_density_scale(density_scale)
-{
-    init_arrays();
-}
-
-template <typename T>
-void RayTransfer<T>::init_arrays()
 {
     const int n_energy = (int)m_bins.energy.size();
-    const int Nx = m_grid->Nx(), Ny = m_grid->Ny();
+    const int Nx = m_plane.get_Nx(), Ny = m_plane.get_Ny();
     continuum_map = std::make_unique<Array2D<T>>(Nx, Ny);
     tau_map = std::make_unique<Array2D<T>>(Nx, Ny);
     flux_cube = std::make_unique<Array3D<T>>(n_energy, Ny, Nx);
@@ -312,7 +288,7 @@ template <typename T>
 void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
 {
     const int n_energy = (int)m_bins.energy.size();
-    const int Nx = m_grid->Nx(), Ny = m_grid->Ny();
+    const int Nx = m_plane.get_Nx(), Ny = m_plane.get_Ny();
 
     // Resolved once here (not once per pixel) -- see trace_pixel()'s header comment for the non-positive
     // ("use the default") convention.
@@ -354,20 +330,20 @@ void RayTransfer<T>::run_raytrace(T r_max, int steplim, int show_progress)
         std::vector<T> line_emission(n_energy), absorption(n_energy);
         std::vector<T> row_spec_line(n_energy, T(0)), row_spec_total(n_energy, T(0));
 
-        const T x = m_grid->x(ix);
+        const T x = m_plane.pixel_x(ix);
         for (int iy = 0; iy < Ny; iy++)
         {
-            const T y = m_grid->y(iy);
-            const T w = m_grid->weight(ix, iy);
+            const T y = m_plane.pixel_y(iy);
+            const T w = m_plane.pixel_weight(ix, iy);
             T continuum;
             const bool hit_corona = trace_pixel(x, y, line_emission, absorption, continuum, r_max_eff, steplim_eff);
             if (hit_corona) ++n_corona_local;
 
             // continuum_map/tau_map/flux_cube are per-sightline scalars, not area densities -- left
             // unweighted regardless of grid type. Only the whole-image-plane aggregates below (spec_line/
-            // spec_total/continuum_total) are weighted by pixel area; for LinearRayTransferGrid, w == 1
-            // always, so every weighted line below is an exact no-op multiplication (bit-identical to the
-            // unweighted sums this class used before grid_type existed).
+            // spec_total/continuum_total) are weighted by pixel area; for a plain ImagePlane,
+            // pixel_weight() == 1 always, so every weighted line below is an exact no-op multiplication
+            // (bit-identical to the unweighted sums this class used before grid_type existed).
             cmap[ix][iy] = continuum;
             continuum_total_local += continuum * w;
             T tau_peak = 0;

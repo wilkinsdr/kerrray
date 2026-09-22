@@ -1,14 +1,14 @@
 add_library(ray_transfer ray_transfer.cpp)
-target_link_libraries(ray_transfer imageplane log_imageplane raytracer)
+target_link_libraries(ray_transfer imageplane raytracer)
 
 add_executable(ray_transfer_pcygni ray_transfer_pcygni.cpp)
 target_link_libraries(ray_transfer_pcygni ray_transfer)
 
 add_executable(ray_transfer_disc_wind ray_transfer_disc_wind.cpp)
-target_link_libraries(ray_transfer_disc_wind ray_transfer ${cfitsio_libs})
+target_link_libraries(ray_transfer_disc_wind ray_transfer log_imageplane ${cfitsio_libs})
 
 add_executable(ray_transfer_kerr_vs_flat ray_transfer_kerr_vs_flat.cpp)
-target_link_libraries(ray_transfer_kerr_vs_flat ray_transfer)
+target_link_libraries(ray_transfer_kerr_vs_flat ray_transfer log_imageplane)
 
 add_executable(ray_transfer_disc_surface ray_transfer_disc_surface.cpp)
-target_link_libraries(ray_transfer_disc_surface ray_transfer ${cfitsio_libs})
+target_link_libraries(ray_transfer_disc_surface ray_transfer log_imageplane ${cfitsio_libs})

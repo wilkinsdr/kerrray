@@ -47,4 +47,4 @@ add_executable(log_imageplane_test log_imageplane_test.cpp)
 target_link_libraries(log_imageplane_test imageplane log_imageplane raytracer)
 
 add_executable(ray_transfer_grid_test ray_transfer_grid_test.cpp)
-target_link_libraries(ray_transfer_grid_test ray_transfer)
+target_link_libraries(ray_transfer_grid_test ray_transfer log_imageplane)
